@@ -44,7 +44,9 @@ import top.yukonga.miuix.kmp.basic.HorizontalDivider
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
+import top.yukonga.miuix.kmp.basic.PullToRefresh
 import top.yukonga.miuix.kmp.basic.Scaffold
+import top.yukonga.miuix.kmp.basic.rememberPullToRefreshState
 import top.yukonga.miuix.kmp.basic.SmallTitle
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
@@ -97,32 +99,48 @@ fun FeedbackScreen(
     var publicQa by remember { mutableStateOf(FeedbackStore.cachedPublicQa(context)) }
     var expandedQa by remember { mutableStateOf(setOf<Int>()) }
 
-    // 还在等回复的工单，进页面就拉一次：节流会把「刚写上的回复」挡在门外。
-    // 全已回复才走配额节流。
-    LaunchedEffect(tickets.size) {
-        if (!FeedbackApi.isConfigured || tickets.isEmpty()) return@LaunchedEffect
-        if (replies.isNotEmpty()) FeedbackStore.markRead(context, replies.keys)
-        val hasPending = tickets.any { it.id !in replies }
-        if (!hasPending && !FeedbackStore.shouldFetchReplies(context, hasPending = false)) {
-            return@LaunchedEffect
+    var refreshing by remember { mutableStateOf(false) }
+
+    /**
+     * 拉一次回复和公共问答。
+     *
+     * @param force 跳过配额节流。进页面和下拉都算用户主动要求，两处都传 true——
+     *   节流是用来挡后台轮询的，不该把「我现在就想看有没有回复」也挡掉。
+     */
+    suspend fun reload(force: Boolean) {
+        if (!FeedbackApi.isConfigured) return
+        // 回复
+        if (tickets.isNotEmpty()) {
+            if (replies.isNotEmpty()) FeedbackStore.markRead(context, replies.keys)
+            val hasPending = tickets.any { it.id !in replies }
+            if (force || hasPending || FeedbackStore.shouldFetchReplies(context, hasPending = false)) {
+                val got = runCatching { FeedbackApi.replies(tickets.map { it.id }) }.getOrNull()
+                if (got != null) {
+                    FeedbackStore.markRepliesFetched(context)
+                    if (got.isNotEmpty()) {
+                        val merged = replies + got
+                        FeedbackStore.cacheReplies(
+                            context,
+                            merged.mapValues { (_, r) -> r.text to r.time },
+                        )
+                        replies = merged
+                        FeedbackStore.markRead(context, got.keys)
+                    }
+                }
+            }
         }
-        val got = runCatching { FeedbackApi.replies(tickets.map { it.id }) }.getOrNull()
-            ?: return@LaunchedEffect
-        FeedbackStore.markRepliesFetched(context)
-        if (got.isEmpty()) return@LaunchedEffect
-        val merged = replies + got
-        FeedbackStore.cacheReplies(context, merged.mapValues { (_, r) -> r.text to r.time })
-        replies = merged
-        FeedbackStore.markRead(context, got.keys)
+        // 公共问答
+        if (force || FeedbackStore.shouldFetchPublicQa(context)) {
+            runCatching { FeedbackApi.publicQa() }.getOrNull()?.let { got ->
+                FeedbackStore.cachePublicQa(context, got)
+                publicQa = got
+            }
+        }
     }
 
-    LaunchedEffect(Unit) {
-        if (!FeedbackApi.isConfigured) return@LaunchedEffect
-        if (!FeedbackStore.shouldFetchPublicQa(context)) return@LaunchedEffect
-        val got = runCatching { FeedbackApi.publicQa() }.getOrNull() ?: return@LaunchedEffect
-        FeedbackStore.cachePublicQa(context, got)
-        publicQa = got
-    }
+    // 每次进入页面都刷新一遍。这一页的全部价值就是「我的反馈有没有人回」，
+    // 打开了却给一份可能几小时前的缓存，等于白开。
+    LaunchedEffect(Unit) { reload(force = true) }
 
     fun open(url: String) {
         runCatching {
@@ -186,6 +204,19 @@ fun FeedbackScreen(
             )
         }
     ) { padding ->
+        val pullState = rememberPullToRefreshState()
+        PullToRefresh(
+            isRefreshing = refreshing,
+            onRefresh = {
+                refreshing = true
+                scope.launch {
+                    reload(force = true)
+                    refreshing = false
+                }
+            },
+            pullToRefreshState = pullState,
+            modifier = Modifier.fillMaxSize().padding(padding),
+        ) {
         Column(
             Modifier
                 .fillMaxSize()
@@ -193,7 +224,6 @@ fun FeedbackScreen(
                 .nestedScroll(scrollBehavior.nestedScrollConnection)
                 .overScrollVertical()
                 .verticalScroll(rememberScrollState())
-                .padding(padding)
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
@@ -456,6 +486,7 @@ fun FeedbackScreen(
                 )
             }
             Spacer(Modifier.height(20.dp))
-        }
+        }   // Column
+        }   // PullToRefresh
     }
 }
