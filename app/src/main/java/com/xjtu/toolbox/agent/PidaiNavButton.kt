@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -22,17 +23,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.airbnb.lottie.compose.LottieAnimation
-import com.airbnb.lottie.compose.LottieClipSpec
-import com.airbnb.lottie.compose.LottieCompositionSpec
-import com.airbnb.lottie.compose.animateLottieCompositionAsState
-import com.airbnb.lottie.compose.rememberLottieComposition
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import top.yukonga.miuix.kmp.theme.MiuixTheme
@@ -44,20 +39,20 @@ import top.yukonga.miuix.kmp.theme.MiuixTheme
  * NavigationBarItem 的灰度线性图标样式——满色形象 + 中心位 + 会动，三重差异叠加，
  * 用户一眼能认出这是"另一类东西"。
  *
- * 形象取自 Google Noto Animated Emoji 的 🤖（OFL-1.1 / Apache-2.0，可商用免署名）。
- * 官方只给一整条 164 帧动画，但它是**分段命名**的，切段就能当多个状态用，
- * 不必额外找素材、也不必改 JSON：
+ * 形象移植自 bloub 项目（x.ai 机器人头像的 SVG 复刻，MIT）：一个墨色形状按径向
+ * 轮廓在状态间实时形变，两眼是身体上的洞。原 Lottie（Noto 🤖）按帧切段复用状态；
+ * bloub 是纯程序动画，状态即状态，映射关系：
  *
- * | 帧段       | 官方图层名       | 这里用作                                |
- * |-----------|-----------------|----------------------------------------|
- * | 68        | INTRO A 末尾     | 待命静帧（站定姿态，见 REST_FRAME 注释）  |
- * | 24 – 70   | wifi 1–6        | 头顶冒信号波纹，机器人本体不动             |
- * | 70 – 164  | SPIN Front/Back | 点击后的一次性转身反馈                    |
+ * | 底栏状态 | bloub 状态 | 表现                                       |
+ * |---------|-----------|--------------------------------------------|
+ * | REST    | 静止 idle | 静圆 + 专注表情，带眨眼与视线漂移               |
+ * | IDLE    | wink      | 眨单眼、头微歪，一次性播完                    |
+ * | THINKING| 轨道 orbit | 三角翻滚甩出彩色轨道环，整周期循环，生成结束为止     |
+ * | ALERT   | notify    | 右上角弹出蓝色通知点并保持，循环直到提醒消失     |
+ * | TAP     | comet     | 缩成小点、彩色彗尾绕它转一圈，再长回来          |
  *
- * 波纹段兼作两种用途：偶发微动播一遍，有主动提醒时循环播。
- *
- * 性能上最要紧的一条：底栏常驻，**绝不能一直播**。绝大多数时间 [isPlaying] 是 false，
- * Lottie 停在静止帧上等价于一张静态图；只有偶发微动、有提醒、被点击这三种情况才起转。
+ * 性能上最要紧的一条：底栏常驻，**待命态只有眨眼和视线漂移在动**（渲染器节流到
+ * ~30fps），主动全速播动画的只有微动、提醒、被点击三种情况。
  */
 @Composable
 fun PidaiNavButton(
@@ -66,45 +61,61 @@ fun PidaiNavButton(
     diameter: Dp = 40.dp,
     excited: Boolean = false,
     selected: Boolean = false,
+    /** Agent 正在思考/生成（AgentThinkingHost.isThinking）：播三点脉冲，直到生成结束。 */
+    thinking: Boolean = false,
     /**
      * 整体上移量。经典底栏里邻居的图标压在 64dp 项高的上半部（顶部内边距 8dp + 26dp 图标），
      * 文字在下半部；屁岱没有文字，纯居中会显得**整个沉下去**，和一排图标不在一条视觉线上。
      * 上移一点让它的重心回到图标那条线附近，同时仍比邻居大一圈、略微探进文字区。
      */
     liftUp: Dp = 0.dp,
+    /** 眼洞露出的底色 = 底栏背景色（经典栏 surface，浮动栏 surfaceContainerHigh）。 */
+    paper: Color = MiuixTheme.colorScheme.surface,
 ) {
     val scope = rememberCoroutineScope()
     val bounce = remember { Animatable(1f) }
     val interactionSource = remember { MutableInteractionSource() }
 
-    val composition by rememberLottieComposition(
-        LottieCompositionSpec.RawRes(com.xjtu.toolbox.R.raw.pidai_robot),
-    )
-
-    // 三个状态互斥，优先级：点击 > 提醒 > 偶发微动。
-    // 用一个 state 表达而不是三个 boolean，避免出现"既在转身又在冒波纹"的叠加态。
+    // 状态互斥，优先级：点击 > 思考 > 提醒 > 偶发微动 > 待命。
+    // 用一个 state 表达而不是多个 boolean，避免出现"既在彗星又在思考"的叠加态。
     var beat by remember { mutableStateOf(PidaiBeat.REST) }
+    val currentThinking by rememberUpdatedState(thinking)
+    val currentExcited by rememberUpdatedState(excited)
 
-    // 提醒态跟着 excited 走。
+    // 思考态跟着生成走：一开始就顶掉提醒和微动；结束回到当时的语境。
+    LaunchedEffect(thinking) {
+        if (thinking) {
+            if (beat != PidaiBeat.TAP) beat = PidaiBeat.THINKING
+        } else if (beat == PidaiBeat.THINKING) {
+            beat = if (excited) PidaiBeat.ALERT else PidaiBeat.REST
+        }
+    }
+    // 提醒态跟着 excited 走，但**不允许打断进行中的点击反馈和思考**：点进屁岱页的
+    // 瞬间气泡常会重新弹出，excited 翻转若直接改写 beat，彗星刚起转就被腰斩。
     LaunchedEffect(excited) {
-        if (excited) beat = PidaiBeat.ALERT
-        else if (beat == PidaiBeat.ALERT) beat = PidaiBeat.REST
+        if (excited) {
+            if (beat != PidaiBeat.TAP && beat != PidaiBeat.THINKING) beat = PidaiBeat.ALERT
+        } else if (beat == PidaiBeat.ALERT) beat = PidaiBeat.REST
     }
     // 一次性段落播完自己落回静止。
     //
-    // 这里用「按时长 delay」而不是「盯着 progress >= 1f」：progress 每帧都变，
+    // 这里用「按时长 delay」而不是「盯着渲染进度」：进度每帧都变，
     // 拿它当 LaunchedEffect 的 key 会导致协程每帧重启一次，白烧。
-    // 段落时长是常量（帧数 / 60fps / speed），直接算出来等就行。
+    // 段落时长是常量，直接算出来等就行。
     LaunchedEffect(beat) {
         val holdMs = when (beat) {
-            PidaiBeat.TAP -> TAP_DURATION_MS
-            PidaiBeat.IDLE -> IDLE_DURATION_MS
+            PidaiBeat.TAP -> COMET_HOLD_MS
+            PidaiBeat.IDLE -> WINK_HOLD_MS
             else -> return@LaunchedEffect
         }
         delay(holdMs)
-        beat = if (excited) PidaiBeat.ALERT else PidaiBeat.REST
+        beat = when {
+            currentThinking -> PidaiBeat.THINKING
+            currentExcited -> PidaiBeat.ALERT
+            else -> PidaiBeat.REST
+        }
     }
-    // 偶发微动：只在真正闲着的时候插播，别打断提醒和点击。
+    // 偶发微动：只在真正闲着的时候插播，别打断提醒、思考和点击。
     LaunchedEffect(Unit) {
         while (true) {
             delay((25_000L..45_000L).random())
@@ -112,21 +123,6 @@ fun PidaiNavButton(
         }
     }
 
-    val clip = when (beat) {
-        PidaiBeat.REST -> LottieClipSpec.Frame(REST_FRAME, REST_FRAME + 1)
-        PidaiBeat.IDLE -> LottieClipSpec.Frame(WAVE_START, WAVE_END)
-        PidaiBeat.ALERT -> LottieClipSpec.Frame(WAVE_START, WAVE_END)
-        PidaiBeat.TAP -> LottieClipSpec.Frame(SPIN_START, SPIN_END)
-    }
-    val progress by animateLottieCompositionAsState(
-        composition = composition,
-        clipSpec = clip,
-        isPlaying = beat != PidaiBeat.REST,
-        iterations = if (beat == PidaiBeat.ALERT) Int.MAX_VALUE else 1,
-        speed = if (beat == PidaiBeat.IDLE) 0.85f else 1f,
-        // 每次换段都从段首重放，否则 Lottie 会拿上一段的进度接着走，动作会从中间"跳"进来。
-        restartOnPlay = true,
-    )
     // 脚下的主色柔光身兼两职：**选中态**给一层淡的（它没有文字标签，不然看不出这个
     // tab 正开着），**有提醒**时给一层浓的。用 drawBehind 画径向渐变而不是加实心圆底：
     // 实心底会把满色的机器人圈死成一颗"按钮"，柔光则是它自己在发亮。
@@ -187,56 +183,22 @@ fun PidaiNavButton(
                 },
             contentAlignment = Alignment.Center,
         ) {
-            if (composition != null) {
-                LottieAnimation(
-                    composition = composition,
-                    progress = { progress },
-                    // 入场段把机器人放大到超出 1024 画布，天线杆顶因此被画布边界切平。
-                    // 关掉画布裁剪，天线就完整了；同时把画面按 0.86 收进容器，
-                    // 给溢出的天线留出余量，不至于顶到底栏边缘。
-                    clipToCompositionBounds = false,
-                    modifier = Modifier.size(diameter * 0.86f),
-                )
-            } else {
-                // 首帧解析完成前的占位：直接空着会让底栏中间塌一个洞。
-                androidx.compose.foundation.Image(
-                    painter = painterResource(com.xjtu.toolbox.R.drawable.shortcut_agent),
-                    contentDescription = null,
-                    modifier = Modifier.size(diameter * 0.6f),
-                    colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(accent),
-                )
-            }
+            // 画布比触摸区大一圈：球和通知点/彩带需要更多作画空间，触摸目标保持 diameter
+            BloubBotIcon(
+                beat = beat,
+                ink = MiuixTheme.colorScheme.onSurface,
+                paper = paper,
+                modifier = Modifier.size(diameter * 1.32f),
+            )
         }
     }
 }
 
-private enum class PidaiBeat { REST, IDLE, ALERT, TAP }
+/** 互斥的动画状态，优先级 TAP > THINKING > ALERT > IDLE > REST。 */
+internal enum class PidaiBeat { REST, IDLE, ALERT, TAP, THINKING }
 
-/**
- * 待命静帧。
- *
- * 官方在第 13 帧打了个 `rest` marker，但那一帧其实落在**入场放大过弹的中途**——
- * 机器人这时被放大到超出 1024 画布，天线杆顶直接被裁掉，位置也偏上。
- * 真正"站定"的姿态在 INTRO A 段的末尾，所以静帧取这里而不是听 marker 的。
- */
-private const val REST_FRAME = 13
+/** wink 一次性的保持时长（bloub wink duration 1.6s）。 */
+private const val WINK_HOLD_MS = 1_600L
 
-/**
- * 头顶信号波纹段。
- *
- * 波纹图层（wifi 1–6）覆盖 24–116 帧，但 70 帧起 SPIN 就开始转身了，
- * 取满会把转身混进来，循环时 116→24 还会硬跳一下。
- * 只取 24–70：机器人正面站定不动，纯波纹一圈圈往外冒，首尾同姿态，循环无缝。
- */
-private const val WAVE_START = 24
-private const val WAVE_END = 70
-
-/** 转身段，一次性播完。 */
-private const val SPIN_START = 70
-private const val SPIN_END = 164
-
-/** 波纹段 46 帧 @60fps，再除以 0.85 倍速。 */
-private const val IDLE_DURATION_MS = 900L
-
-/** SPIN 段 94 帧 @60fps。 */
-private const val TAP_DURATION_MS = 1_570L
+/** 彗星：核在 1.85s 后开始长回、2.45s 长完，再留一点余量让尾巴融进 idle 的入场形变。 */
+private const val COMET_HOLD_MS = 2_500L

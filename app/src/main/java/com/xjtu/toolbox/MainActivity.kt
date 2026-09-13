@@ -2580,9 +2580,11 @@ private fun MainScreen(
                             com.xjtu.toolbox.agent.PidaiNavButton(
                                 onClick = onPidaiTap,
                                 excited = com.xjtu.toolbox.agent.ProactiveBubbleHost.message != null,
+                                thinking = com.xjtu.toolbox.agent.AgentThinkingHost.isThinking,
                                 selected = selectedTab == tab,
                                 diameter = 38.dp,
                                 liftUp = 8.dp,
+                                paper = MiuixTheme.colorScheme.surface,
                                 modifier = Modifier.weight(1f),
                             )
                             return@forEach
@@ -2615,8 +2617,10 @@ private fun MainScreen(
                             com.xjtu.toolbox.agent.PidaiNavButton(
                                 onClick = onPidaiTap,
                                 excited = com.xjtu.toolbox.agent.ProactiveBubbleHost.message != null,
+                                thinking = com.xjtu.toolbox.agent.AgentThinkingHost.isThinking,
                                 selected = selectedTab == tab,
                                 diameter = 40.dp,
+                                paper = MiuixTheme.colorScheme.surfaceContainerHigh,
                             )
                             return@forEach
                         }

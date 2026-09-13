@@ -39,6 +39,15 @@ data class ChatMessage(
     val toolError: String? = null,
 )
 
+/**
+ * Agent 是否正在思考/生成——底栏屁岱的「思考」动画读这里（见 PidaiNavButton）。
+ * 与 [AgentViewModel.isLoading] 由同一个 setter 同步；单独拎出来是因为 ViewModel
+ * 挂在导航项上，而底栏常驻，需要全局可观察（同 ProactiveBubbleHost 的路子）。
+ */
+object AgentThinkingHost {
+    var isThinking by mutableStateOf(false)
+}
+
 class AgentViewModel : ViewModel() {
     companion object {
         private const val CONTEXT_TOKEN_LIMIT = 800_000L
@@ -47,6 +56,13 @@ class AgentViewModel : ViewModel() {
 
     val messages = mutableStateListOf<ChatMessage>()
     var isLoading by mutableStateOf(false)
+        private set
+
+    /** 加载态的唯一写入口：UI 加载与底栏思考动画共用同一信号，不会各走各的。 */
+    private fun applyLoading(loading: Boolean) {
+        isLoading = loading
+        AgentThinkingHost.isThinking = loading
+    }
     var errorMessage by mutableStateOf<String?>(null)
     /**
      * 上下文耗尽标记。变 true 时 UI 应主动弹窗提醒用户"请新开对话"，
@@ -103,7 +119,7 @@ class AgentViewModel : ViewModel() {
         // 不是想把图撤回——丢掉图会让新问题突然没了上下文。
         val keptImages = messages.lastOrNull { it.role == "user" }?.images.orEmpty()
         currentJob?.cancel()
-        isLoading = false
+        applyLoading(false)
         dropLastUserTurn()
         sendMessage(text, config, loginState, context, images = keptImages)
     }
@@ -181,7 +197,7 @@ class AgentViewModel : ViewModel() {
 
     fun newSession() {
         val store = store ?: return
-        currentJob?.cancel(); isLoading = false   // 取消进行中的生成，避免写入新会话造成错乱
+        currentJob?.cancel(); applyLoading(false)   // 取消进行中的生成，避免写入新会话造成错乱
         val s = store.create()
         currentSessionId = s.id
         messages.clear(); llmHistory = JsonArray(); systemPromptAdded = false; tools = null; errorMessage = null
@@ -192,7 +208,7 @@ class AgentViewModel : ViewModel() {
     fun switchSession(id: String) {
         val store = store ?: return
         if (id == currentSessionId && messages.isNotEmpty() && !isLoading) return
-        currentJob?.cancel(); isLoading = false   // 切换前停掉旧生成，避免两个会话内容串台
+        currentJob?.cancel(); applyLoading(false)   // 切换前停掉旧生成，避免两个会话内容串台
         val convo = store.load(id) ?: return
         currentSessionId = id
         messages.clear()
@@ -322,7 +338,7 @@ class AgentViewModel : ViewModel() {
         if (currentSessionId == null) newSession()
         errorMessage = null
         messages.add(ChatMessage("user", userText, images = images))
-        isLoading = true
+        applyLoading(true)
 
         val turnSid = currentSessionId   // 本轮所属会话；切走后不再写当前 messages，避免串台
         var streamIdx = -1   // 流式回答气泡的下标，首个 delta 到达时创建
@@ -592,7 +608,7 @@ class AgentViewModel : ViewModel() {
                 }
             } finally {
                 if (currentSessionId == turnSid) {
-                    isLoading = false
+                    applyLoading(false)
                     persist(turnSid)   // 仅当仍在本会话才落盘，避免把新会话内容写到旧 id
                 }
             }
