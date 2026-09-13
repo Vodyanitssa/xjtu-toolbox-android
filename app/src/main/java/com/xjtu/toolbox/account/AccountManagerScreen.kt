@@ -705,11 +705,12 @@ private fun StatusNotice(text: String) {
 private fun AddAccountDialog(
     onDismiss: () -> Unit,
     onSubmit: (username: String, password: String, accountType: AccountType) -> Unit,
+    // 身份不再让用户选：登录后由一网通办返回的 identityTypeName 自动判定
+    // （见 AccountType.fromIdentityName）。这里先按本科生占位，登录成功即被校正。
 ) {
     var username by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var pwdVisible by remember { mutableStateOf(false) }
-    var accountType by remember { mutableStateOf(AccountType.UNDERGRADUATE) }
     var error by remember { mutableStateOf<String?>(null) }
 
     BackHandler { onDismiss() }
@@ -741,29 +742,6 @@ private fun AddAccountDialog(
                     }
                 }
             )
-            // 身份选择
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                AccountType.entries.forEach { type ->
-                    val selected = accountType == type
-                    Surface(
-                        modifier = Modifier
-                            .weight(1f)
-                            .height(40.dp),
-                        shape = RoundedCornerShape(10.dp),
-                        color = if (selected) MiuixTheme.colorScheme.primary.copy(alpha = 0.12f) else MiuixTheme.colorScheme.surfaceVariant,
-                        onClick = { accountType = type }
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Text(
-                                type.displayName,
-                                color = if (selected) MiuixTheme.colorScheme.primary else MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                                style = MiuixTheme.textStyles.body2,
-                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
-                            )
-                        }
-                    }
-                }
-            }
             error?.let {
                 Text(it, color = MiuixTheme.colorScheme.error, style = MiuixTheme.textStyles.footnote1)
             }
@@ -776,7 +754,7 @@ private fun AddAccountDialog(
                         if (username.isBlank() || password.isBlank()) {
                             error = "请输入学号和密码"; return@TextButton
                         }
-                        onSubmit(username.trim(), password, accountType)
+                        onSubmit(username.trim(), password, AccountType.UNDERGRADUATE)
                     },
                     modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.textButtonColorsPrimary()

@@ -246,6 +246,7 @@ object Routes {
     const val EMPTY_ROOM = "empty_room"
     const val NOTIFICATION = "notification"
     const val ATTENDANCE = "attendance"
+    const val NEW_ATTENDANCE = "new_attendance"
     const val POSTGRADUATE_ATTENDANCE = "postgraduate_attendance"
     const val SCHEDULE = "schedule"
     const val JUDGE = "judge"
@@ -265,6 +266,9 @@ object Routes {
      */
     const val CLASS_REPLAY_PATTERN = "class_replay?courseCode={courseCode}"
     const val LMS = "lms"
+
+    /** 直接落到思源学堂的某门课。courseId 是 LMS 自己的课程 ID。 */
+    fun lmsCourse(courseId: Int) = "lms?courseId=$courseId"
     const val JIAOCAI = "jiaocai"
     const val JIAOCAI1 = "jiaocai1"
     const val JIAOCAI1_READER = "jiaocai1_reader/{ssno}?title={title}"
@@ -298,6 +302,7 @@ object Routes {
 /** shortcut / 搜索 / 深链进功能页时，对应要先登录的站点。null = 无需登录可直达。 */
 fun loginTypeForRoute(route: String): LoginType? = when (route) {
     Routes.ATTENDANCE -> LoginType.ATTENDANCE
+    Routes.NEW_ATTENDANCE -> LoginType.NEW_ATTENDANCE
     Routes.POSTGRADUATE_ATTENDANCE -> LoginType.POSTGRADUATE_ATTENDANCE
     Routes.LIBRARY -> LoginType.LIBRARY
     Routes.CAMPUS_CARD, Routes.PAYMENT_CODE -> LoginType.CAMPUS_CARD
@@ -850,6 +855,7 @@ class AppLoginStateViewModel(application: android.app.Application) : androidx.li
             register(com.xjtu.toolbox.auth.VenueSession())
             register(com.xjtu.toolbox.auth.AttendanceSession(isPostgraduate = false))
             register(com.xjtu.toolbox.auth.AttendanceSession(isPostgraduate = true))
+            register(com.xjtu.toolbox.auth.NewAttendanceSession())
             register(com.xjtu.toolbox.auth.CampusCardSession())
             register(com.xjtu.toolbox.auth.FitnessSession())
             register(com.xjtu.toolbox.auth.IclassfaceSession())
@@ -1212,30 +1218,6 @@ fun AppNavigation(
         onDispose {
             try { connectivityManager?.unregisterNetworkCallback(callback) } catch (_: Exception) {}
         }
-    }
-
-    // ── Srun 校园网（XJTU_STU）自动登录管理器 ──
-    DisposableEffect(Unit) {
-        val mgr = com.xjtu.toolbox.srun.SrunAutoLoginManager(
-            context = context,
-            credentialStore = credentialStore,
-            onResult = { result ->
-                val msg = when (result) {
-                    is com.xjtu.toolbox.srun.SrunAutoLoginManager.Result.Success ->
-                        "校园网已自动登录"
-                    is com.xjtu.toolbox.srun.SrunAutoLoginManager.Result.Failed ->
-                        "校园网自动登录失败：${result.message}"
-                    else -> null
-                }
-                msg?.let {
-                    android.os.Handler(android.os.Looper.getMainLooper()).post {
-                        android.widget.Toast.makeText(context, it, android.widget.Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-        )
-        mgr.register()
-        onDispose { mgr.unregister() }
     }
 
     // 恢复凭据并自动初始化（Splash 只做启动，登录在主界面后台进行）
@@ -1644,6 +1626,11 @@ fun AppNavigation(
         composable(Routes.ATTENDANCE) {
             loginState.sessionManager?.getSiteOrNull("attendance")?.let { AttendanceScreen(site = it, onBack = { navController.popBackStack() }) } ?: LaunchedEffect(Unit) { navController.popBackStack() }
         }
+        composable(Routes.NEW_ATTENDANCE) {
+            loginState.sessionManager?.getSiteOrNull("new_attendance")?.let {
+                com.xjtu.toolbox.newattendance.NewAttendanceScreen(site = it, onBack = { navController.popBackStack() })
+            } ?: LaunchedEffect(Unit) { navController.popBackStack() }
+        }
         composable(Routes.POSTGRADUATE_ATTENDANCE) {
             loginState.sessionManager?.getSiteOrNull("pg_attendance")?.let { AttendanceScreen(site = it, onBack = { navController.popBackStack() }) } ?: LaunchedEffect(Unit) { navController.popBackStack() }
         }
@@ -1833,11 +1820,17 @@ fun AppNavigation(
                 onBack = { navController.popBackStack() }
             )
         }
-        composable(Routes.LMS) {
+        composable(
+            route = "lms?courseId={courseId}",
+            arguments = listOf(
+                navArgument("courseId") { type = NavType.StringType; nullable = true; defaultValue = null }
+            ),
+        ) { entry ->
             loginState.sessionManager?.getSiteOrNull("lms")?.let { site ->
                 com.xjtu.toolbox.lms.LmsScreen(
                     site = site,
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.popBackStack() },
+                    initialCourseId = entry.arguments?.getString("courseId")?.toIntOrNull(),
                 )
             } ?: LaunchedEffect(Unit) { navController.popBackStack() }
         }
@@ -1981,20 +1974,6 @@ fun AppNavigation(
                     showQuickActions = v
                     credentialStore.showQuickActions = v
                 },
-                onAccountTypeChanged = { type ->
-                    loginState.accountType = type
-                    loginState.sessionManager?.accountType =
-                        if (type == com.xjtu.toolbox.auth.AccountType.POSTGRADUATE) {
-                            com.xjtu.toolbox.auth.XJTULogin.AccountType.POSTGRADUATE
-                        } else {
-                            com.xjtu.toolbox.auth.XJTULogin.AccountType.UNDERGRADUATE
-                        }
-                    val id = loginState.accountId
-                    if (id.isNotEmpty()) {
-                        val store = com.xjtu.toolbox.account.AccountStore(context)
-                        store.get(id)?.let { store.upsert(it.copy(accountType = type)) }
-                    }
-                }
             )
         }
 
@@ -2185,6 +2164,7 @@ private fun MainScreen(
             val autoLoginTimeoutMs = when (type) {
                 LoginType.COUPON,
                 LoginType.FITNESS,
+                LoginType.NEW_ATTENDANCE,
                 LoginType.JIAOXIAOZHI -> 180_000L
                 // 场馆/电子凭证等走「CAS OAuth → org 中转 → 业务站」多跳链路，
                 // 叠加 CasGate 限频与 WebVPN 改写后 25s 常不够用，超时即表现为"打不开"。
@@ -2486,18 +2466,16 @@ private fun MainScreen(
             }
         },
         topBar = {
-            // 屁岱和学辅这两页永远用折叠态标题。
-            // 大标题适合"一屏内容从头往下读"的页面；这两页一个是从下往上长的聊天、
-            // 一个标题本身就长（仲英学辅资料站），大标题只会挤占内容并随滚动忽大忽小。
-            // miuix 的 SmallTopAppBar 就是钉死在折叠态的版本。
-            if (selectedTab == BottomTab.PIDAI || selectedTab == BottomTab.TOOLS) {
-                val pidai = selectedTab == BottomTab.PIDAI
+            // 屁岱永远用折叠态标题：它是从下往上长的聊天，大标题会随滚动忽大忽小。
+            // 学辅原来也在这一档，理由是"它是个 WebView，没有可驱动折叠的原生滚动"；
+            // 现在那一页换成了原生列表，正是大标题适用的场景，于是移回下面那一档。
+            if (selectedTab == BottomTab.PIDAI) {
                 top.yukonga.miuix.kmp.basic.SmallTopAppBar(
-                    title = if (pidai) agentTitle else "仲英学辅资料站",
+                    title = agentTitle,
                     color = MiuixTheme.colorScheme.surface,
-                    scrollBehavior = if (pidai) agentScrollBehavior else toolsScrollBehavior,
-                    navigationIcon = { if (pidai) agentHeaderNavIcon?.invoke() },
-                    actions = { if (pidai) agentHeaderActions?.invoke(this) },
+                    scrollBehavior = agentScrollBehavior,
+                    navigationIcon = { agentHeaderNavIcon?.invoke() },
+                    actions = { agentHeaderActions?.invoke(this) },
                 )
             } else {
             TopAppBar(
@@ -3786,6 +3764,7 @@ private fun HomeTab(
             Routes.CLASS_REPLAY to Icons.Default.OndemandVideo,
             Routes.SCHOOL_COURSE to Icons.Default.TravelExplore,
             Routes.ATTENDANCE to Icons.Default.EventAvailable,
+            Routes.NEW_ATTENDANCE to Icons.Default.AssignmentTurnedIn,
             Routes.POSTGRADUATE_ATTENDANCE to Icons.AutoMirrored.Filled.FactCheck,
             Routes.ICLASSFACE to Icons.Default.Face,
             Routes.MATCH to Icons.Default.Groups,
@@ -4073,13 +4052,50 @@ private fun CoursesTab(
     }
 }
 
+/**
+ * 用学校登记的身份校正账号类型。
+ *
+ * 之前这个开关只能用户自己在设置里选，选错的后果不是"显示不对"而是 CAS
+ * 选身份时走错分支、一串子系统登不上，而普通用户根本没法判断自己该选哪个
+ * （"我是直博生算研究生吗"）。既然一网通办已经把身份告诉我们了，就别再问。
+ *
+ * 识别不出来时什么都不做——保留用户原有设置，不用猜测覆盖已知。
+ */
+private fun applyDetectedAccountType(
+    context: android.content.Context,
+    loginState: AppLoginState,
+    accountManager: com.xjtu.toolbox.account.AccountManager,
+    identityTypeName: String?,
+) {
+    val detected = com.xjtu.toolbox.auth.AccountType.fromIdentityName(identityTypeName) ?: return
+    if (detected == loginState.accountType) return
+    loginState.accountType = detected
+    loginState.sessionManager?.accountType =
+        if (detected == com.xjtu.toolbox.auth.AccountType.POSTGRADUATE) {
+            com.xjtu.toolbox.auth.XJTULogin.AccountType.POSTGRADUATE
+        } else {
+            com.xjtu.toolbox.auth.XJTULogin.AccountType.UNDERGRADUATE
+        }
+    com.xjtu.toolbox.util.CredentialStore(context).accountType = detected
+    val id = loginState.accountId
+    if (id.isNotEmpty()) {
+        val store = com.xjtu.toolbox.account.AccountStore(context)
+        store.get(id)?.let { store.upsert(it.copy(accountType = detected)) }
+    }
+}
+
 // ══════════════════════════════════════════
 //  Tab 3 — 仲英学辅资料站（zyxf.top）
 // ══════════════════════════════════════════
 
-private const val ZYXF_URL = "https://zyxf.top"
-
-@SuppressLint("SetJavaScriptEnabled")
+/**
+ * Tab 3 —— 仲英学辅资料站。
+ *
+ * 从"把 zyxf.top 整站塞进 WebView"改成原生：列表、检索、下载走它的公开只读接口，
+ * 排版用 MIUIX，和应用其它页面一致（见 [com.xjtu.toolbox.zyxf.ZyxfBrowseScreen]）。
+ * 预览那一层仍然是 WebView，但只装一个壳页借阿里云 IMM 的渲染，
+ * 不再把它整套 SPA 拖进来。
+ */
 @Composable
 private fun ToolsTab(
     loginState: AppLoginState,
@@ -4088,306 +4104,12 @@ private fun ToolsTab(
     scrollBehavior: ScrollBehavior? = null,
     navBarStyle: String = "floating"
 ) {
-    var webViewRef by remember { mutableStateOf<android.webkit.WebView?>(null) }
-    var canGoBack by remember { mutableStateOf(false) }
-    var progress by remember { mutableIntStateOf(0) }
-    var isPageLoading by remember { mutableStateOf(true) }
-    var loadError by remember { mutableStateOf<String?>(null) }
-    val ctx = LocalContext.current
-    val dlScope = rememberCoroutineScope()
-    val isDark = LocalIsDarkTheme.current
-    val darkState = rememberUpdatedState(isDark)
-
-    LaunchedEffect(isDark, webViewRef) {
-        webViewRef?.let { WebViewNightMode.apply(it, isDark) }
-    }
-
-    // blob: 下载桥。
-    //
-    // 资料站用 JS 把文件读进内存后 URL.createObjectURL() 生成 blob: 地址触发下载。
-    // blob: 仅在该页面的 JS 上下文有效，App 侧 HTTP 客户端无法访问
-    // （OkHttp 会抛 "expected url scheme http or https but was blob"）。
-    // 只能由页面内的 JS 读成 base64 回传，App 侧解码落盘。
-    val blobBridge = remember(ctx) {
-        object {
-            @android.webkit.JavascriptInterface
-            fun onBlob(base64: String, fileName: String) {
-                dlScope.launch {
-                    val saved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        runCatching {
-                            // base64 形如 data:application/pdf;base64,xxxx —— MIME 也能顺便取到
-                            val mime = base64.substringAfter("data:", "")
-                                .substringBefore(";", "")
-                            val bytes = android.util.Base64.decode(
-                                base64.substringAfter(","),
-                                android.util.Base64.DEFAULT
-                            )
-                            val uri = com.xjtu.toolbox.lms.LmsDownloadStore.saveBytes(
-                                context = ctx,
-                                fileName = fileName.ifBlank { "download_${System.currentTimeMillis()}" },
-                                mimeType = mime,
-                                bytes = bytes,
-                                category = com.xjtu.toolbox.lms.LmsDownloadStore.CATEGORY_ZYXF,
-                            )
-                            uri to bytes.size
-                        }.getOrElse { e ->
-                            android.util.Log.e("ToolsTab", "blob save failed", e)
-                            null to 0
-                        }
-                    }
-                    val (uri, size) = saved
-                    android.widget.Toast.makeText(
-                        ctx,
-                        if (uri != null) "已保存 $fileName（${size / 1024} KB）" else "保存失败",
-                        android.widget.Toast.LENGTH_SHORT
-                    ).show()
-                }
-            }
-        }
-    }
-
-    // 站内有历史时，系统返回键先回退网页，避免直接退出 App
-    BackHandler(enabled = canGoBack) { webViewRef?.goBack() }
-
-    Box(
-        Modifier
-            .fillMaxSize()
-            .padding(bottom = if (navBarStyle == "floating") 88.dp else 0.dp)
-    ) {
-        androidx.compose.ui.viewinterop.AndroidView(
-            factory = { ctx ->
-                android.webkit.WebView(ctx).apply {
-                    layoutParams = android.view.ViewGroup.LayoutParams(
-                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.loadWithOverviewMode = true
-                    settings.useWideViewPort = true
-                    webViewClient = object : android.webkit.WebViewClient() {
-                        // 诊断 + 兜底：把每次导航请求打出来。
-                        // 如果点下载后这里出现了一个像文件的 URL 而 DownloadListener 没触发，
-                        // 说明服务端没给 Content-Disposition，WebView 把它当页面导航了 ——
-                        // 这种情况按扩展名判断并自己接管下载。
-                        override fun shouldOverrideUrlLoading(
-                            view: android.webkit.WebView?,
-                            request: android.webkit.WebResourceRequest?
-                        ): Boolean {
-                            val u = request?.url?.toString() ?: return false
-                            android.util.Log.d("ToolsTab", "navigate: $u")
-                            // 不按扩展名判断是否为下载：资料站格式无法穷举
-                            // （.md/.tex/.caj/.tar.gz，甚至没有扩展名），且是否为附件取决于
-                            // 服务器响应头而非 URL 形状。
-                            // 交给 WebView 请求即可，附件类响应会走下面的 DownloadListener。
-                            return false
-                        }
-
-                        override fun onPageStarted(view: android.webkit.WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                            isPageLoading = true
-                            loadError = null
-                        }
-                        override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
-                            isPageLoading = false
-                            canGoBack = view?.canGoBack() == true
-
-                            // 挂钩 a.click()：JS 造 <a href=blob:> 再 click() 这条路径
-                            // 不一定触发 DownloadListener（取决于 WebView 版本与 download 属性），
-                            // 不拦就点了没反应。是 blob 链接就读成 base64 交给桥。
-                            view?.evaluateJavascript(
-                                """
-                                (function() {
-                                  if (window.__xjtuBlobHooked) return;
-                                  window.__xjtuBlobHooked = true;
-                                  var origClick = HTMLAnchorElement.prototype.click;
-                                  HTMLAnchorElement.prototype.click = function() {
-                                    try {
-                                      var h = this.href || '';
-                                      if (h.indexOf('blob:') === 0) {
-                                        var nm = this.getAttribute('download') || 'download';
-                                        var xhr = new XMLHttpRequest();
-                                        xhr.open('GET', h, true);
-                                        xhr.responseType = 'blob';
-                                        xhr.onload = function() {
-                                          var r = new FileReader();
-                                          r.onloadend = function() { XJTUBlobBridge.onBlob(r.result, nm); };
-                                          r.readAsDataURL(xhr.response);
-                                        };
-                                        xhr.send();
-                                        return;
-                                      }
-                                    } catch (e) {}
-                                    return origClick.apply(this, arguments);
-                                  };
-                                })();
-                                """.trimIndent(),
-                                null
-                            )
-                            view?.let { WebViewNightMode.apply(it, darkState.value) }
-                        }
-                        override fun onReceivedError(
-                            view: android.webkit.WebView?,
-                            request: android.webkit.WebResourceRequest?,
-                            error: android.webkit.WebResourceError?
-                        ) {
-                            // 只把主文档失败视为页面错误，子资源失败忽略
-                            if (request?.isForMainFrame == true) {
-                                isPageLoading = false
-                                loadError = "无法连接 zyxf.top，请检查网络后重试"
-                            }
-                        }
-                    }
-                    // 允许 JS 开新窗口，否则 target="_blank" 的下载链接会被直接吞掉
-                    settings.setSupportMultipleWindows(true)
-                    settings.javaScriptCanOpenWindowsAutomatically = true
-                    webChromeClient = object : android.webkit.WebChromeClient() {
-                        override fun onProgressChanged(view: android.webkit.WebView?, newProgress: Int) {
-                            progress = newProgress
-                        }
-
-                        // 资料站的下载链接不少是 target="_blank"。开了 setSupportMultipleWindows 后
-                        // 这类点击会走到这里，如果不处理就**什么都不会发生**（比不开还糟）。
-                        // 这里不真开新窗口，而是把目标 URL 交回当前 WebView：
-                        // 是文件就触发 DownloadListener，是页面就正常导航。
-                        override fun onCreateWindow(
-                            view: android.webkit.WebView?,
-                            isDialog: Boolean,
-                            isUserGesture: Boolean,
-                            resultMsg: android.os.Message?
-                        ): Boolean {
-                            val transport = resultMsg?.obj as? android.webkit.WebView.WebViewTransport
-                                ?: return false
-                            val tmp = android.webkit.WebView(view!!.context)
-                            tmp.webViewClient = object : android.webkit.WebViewClient() {
-                                override fun shouldOverrideUrlLoading(
-                                    v: android.webkit.WebView?,
-                                    req: android.webkit.WebResourceRequest?
-                                ): Boolean {
-                                    req?.url?.toString()?.let { view.loadUrl(it) }
-                                    tmp.destroy()
-                                    return true
-                                }
-                            }
-                            transport.webView = tmp
-                            resultMsg.sendToTarget()
-                            return true
-                        }
-                    }
-                    // 资料站下载落到公共下载目录并登记进 LmsDownloadStore，与成绩单、
-                    // 思源课件同处，在下载管理页作为独立分区显示。
-                    // 不走 classreplay 的 DownloadManager：那套面向回放视频（断点续传、
-                    // 并发限流、按 camera/audio 分轨），文件类下载塞进去会让分类失真。
-                    addJavascriptInterface(blobBridge, "XJTUBlobBridge")
-                    setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
-                        android.util.Log.d(
-                            "ToolsTab",
-                            "onDownloadStart: url=$url mime=$mimeType disposition=$contentDisposition"
-                        )
-                        val name = runCatching {
-                            android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType)
-                        }.getOrNull().orEmpty()
-
-                        // blob: 走 JS 桥读内容，不能交给 OkHttp（scheme 不支持，会抛
-                        // "expected url scheme http or https but was blob"）
-                        if (url.startsWith("blob:")) {
-                            val js = """
-                                (function() {
-                                  var xhr = new XMLHttpRequest();
-                                  xhr.open('GET', '$url', true);
-                                  xhr.responseType = 'blob';
-                                  xhr.onload = function() {
-                                    var r = new FileReader();
-                                    r.onloadend = function() {
-                                      XJTUBlobBridge.onBlob(r.result, ${'"'}${name.ifBlank { "download" }}${'"'});
-                                    };
-                                    r.readAsDataURL(xhr.response);
-                                  };
-                                  xhr.onerror = function() { XJTUBlobBridge.onBlob('', ''); };
-                                  xhr.send();
-                                })();
-                            """.trimIndent()
-                            webViewRef?.evaluateJavascript(js, null)
-                            return@setDownloadListener
-                        }
-                        // 普通 http(s) 下载：落到公共 Downloads/XJTUToolBox（与成绩单、思源课件同处），
-                        // 走 MediaStore 不需要存储权限，系统文件管理器可见、卸载不丢。
-                        val cookie = runCatching {
-                            android.webkit.CookieManager.getInstance().getCookie(url)
-                        }.getOrNull()
-                        dlScope.launch {
-                            android.widget.Toast.makeText(
-                                ctx, "开始下载 ${name.ifBlank { "文件" }}", android.widget.Toast.LENGTH_SHORT
-                            ).show()
-                            val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                com.xjtu.toolbox.zyxf.ZyxfDownloader.download(
-                                    context = ctx,
-                                    url = url,
-                                    fallbackName = name,
-                                    userAgent = userAgent,
-                                    cookie = cookie,
-                                )
-                            }
-                            android.widget.Toast.makeText(
-                                ctx,
-                                if (ok != null) "已保存 $ok" else "下载失败，可长按链接用浏览器打开",
-                                android.widget.Toast.LENGTH_SHORT
-                            ).show()
-                        }
-                    }
-                    loadUrl(ZYXF_URL)
-                    webViewRef = this
-                }
-            },
-            modifier = Modifier.fillMaxSize()
-        )
-
-        // 顶部加载进度线
-        if (isPageLoading && loadError == null) {
-            LinearProgressIndicator(
-                progress = (progress / 100f).coerceIn(0.05f, 1f),
-                modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
-                height = 2.dp
-            )
-        }
-
-        // 主文档加载失败的兜底页
-        loadError?.let { msg ->
-            Column(
-                Modifier
-                    .fillMaxSize()
-                    .background(MiuixTheme.colorScheme.background)
-                    .padding(horizontal = 24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Icon(
-                    Icons.Default.CloudOff,
-                    contentDescription = null,
-                    tint = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                    modifier = Modifier.size(56.dp)
-                )
-                Spacer(Modifier.height(16.dp))
-                Text(
-                    "仲英学辅资料站",
-                    style = MiuixTheme.textStyles.title3,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    msg,
-                    style = MiuixTheme.textStyles.body2,
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                )
-                Spacer(Modifier.height(20.dp))
-                Button(onClick = {
-                    loadError = null
-                    isPageLoading = true
-                    webViewRef?.loadUrl(ZYXF_URL)
-                }) { Text("重新加载") }
-            }
-        }
-    }
+    com.xjtu.toolbox.zyxf.ZyxfBrowseScreen(
+        contentPadding = PaddingValues(
+            bottom = if (navBarStyle == "floating") 96.dp else 0.dp,
+        ),
+        scrollBehavior = scrollBehavior,
+    )
 }
 
 // ══════════════════════════════════════════
@@ -4564,20 +4286,14 @@ private fun ProfileTab(
         mutableStateOf(com.xjtu.toolbox.hello.HelloProfileStore.hasCustomAvatar(ctx))
     }
     var avatarSaving by remember { mutableStateOf(false) }
+    // 选中的图先交给裁剪器，确认后才落盘。直接存原图的话，非正方形的照片
+    // 会被显示侧的圆形裁切成随机的一块（多数人截图都是竖的，脸正好在圈外）。
+    var avatarCropUri by remember { mutableStateOf<android.net.Uri?>(null) }
     val avatarPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        avatarSaving = true
-        scope.launch {
-            val ok = com.xjtu.toolbox.hello.HelloProfileStore.saveCustomAvatar(ctx, uri)
-            if (ok) {
-                helloAvatar = com.xjtu.toolbox.hello.HelloProfileStore.cachedAvatar(ctx)
-                hasCustomAvatar = true
-            }
-            avatarSaving = false
-            showAvatarSheet = false
-        }
+        avatarCropUri = uri
     }
 
     LaunchedEffect(loginState.isLoggedIn, loginState.activeUsername) {
@@ -4597,13 +4313,6 @@ private fun ProfileTab(
                 helloAvatar = com.xjtu.toolbox.hello.HelloProfileStore.cachedAvatar(ctx)
             }
     }
-
-    // Srun 校园网首次配置弹窗状态
-    val showSrunSetupSheet = remember { mutableStateOf(false) }
-    var srunSetupUsername by remember { mutableStateOf("") }
-    var srunSetupPassword by remember { mutableStateOf("") }
-    var srunSetupSaving by remember { mutableStateOf(false) }
-    var srunSetupHint by remember { mutableStateOf<String?>(null) }
 
     // 智能登录：JWXT→核心登录→YWTB后台
     fun loginAllSystems(user: String, pwd: String) {
@@ -4640,13 +4349,6 @@ private fun ProfileTab(
             accountManager.persistCurrentLogin(user, pwd, loginState.accountType)
             loginState.persistCredentials(credentialStore)
 
-            // ── 首次登录后引导用户配置 Srun 校园网自动登录 ──
-            if (!credentialStore.srunSetupAsked) {
-                showSrunSetupSheet.value = true
-                // 默认填入主账号 + @stu 作为 Srun 用户名提示
-                srunSetupUsername = if (user.contains("@")) user else "$user@stu"
-            }
-
             // ── 后台: 仅预热必要 SSO，其余子系统由用户进入时按需登录 ──
             onWarmupRequest()
             scope.launch(kotlinx.coroutines.Dispatchers.IO) {
@@ -4658,6 +4360,12 @@ private fun ProfileTab(
                         loginState.ywtbUserInfo?.userName?.let { name ->
                             accountManager.updateNickname(user, name)
                         }
+                        // 身份（本科生/研究生）以学校的登记为准，不劳用户自己在设置里选。
+                        // identityTypeName 是一网通办返回的原字段，见 AccountType.fromIdentityName。
+                        applyDetectedAccountType(
+                            ctx, loginState, accountManager,
+                            loginState.ywtbUserInfo?.identityTypeName,
+                        )
                     }
                 } catch (_: Exception) { }
                 // 首次登录抓一次个人档案 + 头像并落盘，之后"我的"页直接读缓存。
@@ -4669,6 +4377,28 @@ private fun ProfileTab(
                 } catch (_: Exception) { }
             }
         }
+    }
+
+    // ── 头像裁剪 ──
+    avatarCropUri?.let { cropUri ->
+        com.xjtu.toolbox.ui.components.AvatarCropDialog(
+            uri = cropUri,
+            onCancel = { avatarCropUri = null },
+            onConfirm = { bitmap ->
+                avatarCropUri = null
+                avatarSaving = true
+                scope.launch {
+                    val ok = com.xjtu.toolbox.hello.HelloProfileStore
+                        .saveCustomAvatarBitmap(ctx, bitmap)
+                    if (ok) {
+                        helloAvatar = com.xjtu.toolbox.hello.HelloProfileStore.cachedAvatar(ctx)
+                        hasCustomAvatar = true
+                    }
+                    avatarSaving = false
+                    showAvatarSheet = false
+                }
+            },
+        )
     }
 
     // ── 换头像弹窗 ──
@@ -4713,81 +4443,6 @@ private fun ProfileTab(
                     onClick = { if (!avatarSaving) showAvatarSheet = false },
                     modifier = Modifier.fillMaxWidth()
                 )
-            }
-        }
-    }
-
-    // ── Srun 校园网（XJTU_STU）首次配置弹窗（OverlayDialog 抗键盘弹飞）──
-    if (showSrunSetupSheet.value) {
-        OverlayDialog(
-            show = showSrunSetupSheet.value,
-            title = "校园网自动登录",
-            summary = "连接校园 WiFi 时自动帮你登录 Srun 网关，免去每次手动认证。",
-            onDismissRequest = {
-                showSrunSetupSheet.value = false
-                credentialStore.srunSetupAsked = true
-            }
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .imePadding(),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                TextField(
-                    value = srunSetupUsername,
-                    onValueChange = { srunSetupUsername = it; srunSetupHint = null },
-                    label = "校园网账号（含 @stu/@xjtu 后缀）",
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                TextField(
-                    value = srunSetupPassword,
-                    onValueChange = { srunSetupPassword = it; srunSetupHint = null },
-                    label = "校园网密码",
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
-                )
-                srunSetupHint?.let {
-                    Text(it, color = MiuixTheme.colorScheme.error, style = MiuixTheme.textStyles.footnote1)
-                }
-                Text(
-                    "凭据使用 Android Keystore 加密存储；仅当连接到 XJTU_STU 时本机自动发起登录。" +
-                        "可在「设置 → 校园网自动登录」中随时修改或关闭。",
-                    style = MiuixTheme.textStyles.footnote2,
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary
-                )
-                Row(Modifier.fillMaxWidth()) {
-                    TextButton(
-                        text = "暂不开启",
-                        onClick = {
-                            credentialStore.srunSetupAsked = true
-                            credentialStore.srunAutoLoginEnabled = false
-                            showSrunSetupSheet.value = false
-                        },
-                        modifier = Modifier.weight(1f)
-                    )
-                    Spacer(Modifier.width(20.dp))
-                    TextButton(
-                        text = if (srunSetupSaving) "保存中..." else "启用并保存",
-                        onClick = {
-                            if (srunSetupUsername.isBlank() || srunSetupPassword.isBlank()) {
-                                srunSetupHint = "请填写账号和密码（或选择跳过）"
-                                return@TextButton
-                            }
-                            srunSetupSaving = true
-                            credentialStore.saveSrunCredentials(srunSetupUsername.trim(), srunSetupPassword)
-                            credentialStore.srunAutoLoginEnabled = true
-                            credentialStore.srunSetupAsked = true
-                            srunSetupSaving = false
-                            showSrunSetupSheet.value = false
-                        },
-                        enabled = !srunSetupSaving,
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.textButtonColorsPrimary()
-                    )
-                }
             }
         }
     }
@@ -5064,6 +4719,12 @@ private fun ProfileTab(
                     if (ywtbSite != null && loginState.ywtbUserInfo == null) {
                         runCatching {
                             loginState.ywtbUserInfo = com.xjtu.toolbox.ywtb.YwtbApi(ywtbSite).getUserInfo()
+                            // 老用户不会再走一次首登流程，身份校正得在这儿也挂一次，
+                            // 否则升级上来的人还停在当初手选的那个值上。
+                            applyDetectedAccountType(
+                                ctx, loginState, accountManager,
+                                loginState.ywtbUserInfo?.identityTypeName,
+                            )
                         }
                     }
                 }
@@ -5836,69 +5497,6 @@ private fun EulaScreen(onAccept: () -> Unit) {
         }
     }
 
-    val boldStyle = androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold, color = MiuixTheme.colorScheme.primary)
-
-    // 条款数据 —— title + AnnotatedString body（关键语句加粗）
-    data class EulaSection(val title: String, val body: androidx.compose.ui.text.AnnotatedString)
-    val sections = listOf(
-        EulaSection(
-            "一、应用性质",
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("本应用（「岱宗盒子」）是西安交通大学学生自主开发的非官方校园工具，")
-                pushStyle(boldStyle); append("完全开源、无毒无害"); pop()
-                append("，通过模拟浏览器行为访问学校现有的 Web 服务接口，为学生提供统一便捷的校园信息查询体验。本应用不隶属于、不代表西安交通大学或其任何部门。")
-            }
-        ),
-        EulaSection(
-            "二、数据来源与使用",
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("本应用通过 HTTPS 协议访问学校各业务系统接口获取数据，校园系统请求均在您的设备上发起。您的账号凭据（用户名和密码）仅加密存储在本地设备中，不会上传至开发者服务器。")
-                pushStyle(boldStyle); append("请勿将账号、验证码、API Key 等敏感信息交给不可信来源。"); pop()
-            }
-        ),
-        EulaSection(
-            "三、AI 与第三方服务",
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("屁岱等 AI 功能由用户自行配置模型服务与 API Key。使用这些功能时，您的问题、上下文、工具查询结果、上传附件摘要等内容可能会发送给您选择的模型服务商或中转服务。")
-                pushStyle(boldStyle); append("请优先选择可信服务商，妥善保管 API Key，避免提交不希望第三方处理的个人信息。"); pop()
-                append("学校交晓智服务由上游系统处理，本应用仅提供原生入口与会话封装，回答内容仅供参考。")
-            }
-        ),
-        EulaSection(
-            "四、本地文件与下载",
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("成绩单、课件、作业附件等下载内容会按系统规则保存到本机下载目录或应用私有目录。保存到公共下载目录的文件可能被文件管理器、备份软件或具备相应权限的其他应用读取。请自行管理、删除或转移包含个人信息的文件。")
-            }
-        ),
-        EulaSection(
-            "五、免责声明",
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("1. 本应用按「按原样」（AS IS）提供，开发者不对其准确性、完整性、可用性或适用性作任何明示或暗示的保证。\n2. 因使用本应用导致的任何直接或间接损失（包括但不限于数据丢失、账号异常、学业影响等），开发者不承担任何责任。\n3. 若学校系统接口变更导致功能异常，开发者将尽力修复但不保证时效。\n4. 本应用可能因学校政策调整而需要停止服务，届时将提前告知用户。")
-            }
-        ),
-        EulaSection(
-            "六、合规声明",
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("1. 本应用仅供西安交通大学在校师生个人学习和生活使用，严禁用于任何商业用途。\n2. ")
-                pushStyle(boldStyle); append("本应用不提供抢选、抢课、刷分等牟利功能。"); pop()
-                append("\n3. ")
-                pushStyle(boldStyle); append("本应用不接入支付、退款等金额交易功能。"); pop()
-                append("\n4. 使用者应遵守学校各系统的使用规定和信息安全管理条例。\n5. 本应用会尽量复用会话并限制异常重试，但严禁利用本应用进行恶意请求、批量爬取、接口滥用等行为。违者应自行承担相应责任。")
-            }
-        ),
-        EulaSection(
-            "七、知识产权",
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("本应用源代码基于 MIT 协议开源，感谢相关项目的启发。所访问的各业务系统之数据、接口及商标均归西安交通大学及相关权利方所有。")
-            }
-        ),
-        EulaSection(
-            "八、条款变更",
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("开发者保留随时修改本协议的权利。更新后的协议将在新版本发布时生效，继续使用本应用即视为接受修改后的条款。")
-            }
-        )
-    )
 
     Scaffold(
         topBar = {
@@ -5925,19 +5523,7 @@ private fun EulaScreen(onAccept: () -> Unit) {
             )
             Spacer(Modifier.height(16.dp))
 
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceVariant)
-            ) {
-                Column(Modifier.padding(16.dp)) {
-                    sections.forEachIndexed { idx, section ->
-                        if (idx > 0) Spacer(Modifier.height(12.dp))
-                        Text(section.title, style = MiuixTheme.textStyles.subtitle, fontWeight = FontWeight.Bold, color = MiuixTheme.colorScheme.primary)
-                        Spacer(Modifier.height(4.dp))
-                        Text(section.body, style = MiuixTheme.textStyles.body2, color = MiuixTheme.colorScheme.onSurface, lineHeight = 20.sp)
-                    }
-                }
-            }
+            com.xjtu.toolbox.legal.Eula.Body()
 
             Spacer(Modifier.height(16.dp))
 
@@ -6273,6 +5859,7 @@ private fun siteKeyForBrowserUrl(url: String): String {
         "ywtb.xjtu.edu.cn" in host -> "ywtb"
         "ncard.xjtu.edu.cn" in host -> "campus_card"
         "bkkq.xjtu.edu.cn" in host -> "attendance"
+        "kq.xjtu.edu.cn" in host -> "new_attendance"
         "lms.xjtu.edu.cn" in host -> "lms"
         else -> "jwxt"
     }

@@ -46,7 +46,13 @@ import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.InfiniteProgressIndicator
-import top.yukonga.miuix.kmp.basic.Scaffold
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsPadding
+import top.yukonga.miuix.kmp.basic.ButtonDefaults
+import top.yukonga.miuix.kmp.basic.SmallTopAppBar
 import top.yukonga.miuix.kmp.basic.Surface
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextButton
@@ -78,9 +84,31 @@ fun QrLoginScreen(
             dismissOnBackPress = true,
             dismissOnClickOutside = false,
             usePlatformDefaultWidth = false,
-            decorFitsSystemWindows = true,
+            // 取景画面要一直铺到状态栏后面，所以这一层不让系统替我们留白，
+            // 让位改由内容自己用 windowInsetsPadding 控制。
+            decorFitsSystemWindows = false,
         ),
     ) {
+        val dialogWindow = (androidx.compose.ui.platform.LocalView.current.parent
+            as? androidx.compose.ui.window.DialogWindowProvider)?.window
+        androidx.compose.runtime.SideEffect {
+            dialogWindow?.let { w ->
+                androidx.core.view.WindowCompat.setDecorFitsSystemWindows(w, false)
+                w.setBackgroundDrawableResource(android.R.color.transparent)
+                // 那条黑边有两个来源，缺一不可：
+                // 1) Dialog 默认带 FLAG_DIM_BEHIND，在窗口盖不到的状态栏区域，
+                //    透出来的是被压暗 0.6 的下层界面——看着就是一条黑带；
+                // 2) 窗口本身被限制在状态栏以下，只有 NO_LIMITS 才真正铺满整屏。
+                // 另外这里用整体重设 attributes 而不是 addFlags：窗口已经显示之后，
+                // addFlags 不保证触发重新布局，改 attributes 才会走 updateViewLayout。
+                w.setDimAmount(0f)
+                w.attributes = w.attributes.apply {
+                    width = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                    height = android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                    flags = flags or android.view.WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                }
+            }
+        }
         QrLoginContent(sessionManager = sessionManager, onBack = onBack)
     }
 }
@@ -92,6 +120,17 @@ private fun QrLoginContent(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val loginState = com.xjtu.toolbox.LocalAppLoginState.current
+
+    /** 确认页上展示的账号。昵称优先，没有就用学号。 */
+    val accountLabel = remember(loginState.cachedNickname, loginState.activeUsername) {
+        val nick = loginState.cachedNickname?.takeIf { it.isNotBlank() }
+        val user = loginState.activeUsername.takeIf { it.isNotBlank() }
+        when {
+            nick != null && user != null -> "$nick · $user"
+            else -> nick ?: user
+        }
+    }
 
     fun hasCameraPermission(): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
@@ -156,33 +195,53 @@ private fun QrLoginContent(
 
     BackHandler(onBack = onBack)
 
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = MiuixTheme.colorScheme.background,
+    val scanning = state is UiState.Scanning
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .background(
+                if (scanning) Color.Black else MiuixTheme.colorScheme.background
+            ),
     ) {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = "扫码登录",
-                    navigationIcon = {
-                        IconButton(onClick = onBack) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = "返回",
-                                tint = MiuixTheme.colorScheme.onSurface,
-                            )
-                        }
-                    },
-                )
-            },
-        ) { padding ->
+        // 取景画面铺满整屏（含状态栏后面），标题栏浮在它上面。
+        // 之前整页套在 Scaffold 里，相机被挤在标题栏下方，顶上留一条灰边。
+        if (scanning) {
+            ScanningContent(onResult = ::onDecoded)
+        }
+
+        // 不要在这里再补 statusBars 让位：SmallTopAppBar 的
+        // defaultWindowInsetsPadding 默认就是 true，自己会让，叠一层就是双倍留白。
+        Column(Modifier.fillMaxSize()) {
+            // 始终折叠：这一页没有可滚动的长内容，大标题只会占掉取景空间，
+            // miuix 的 SmallTopAppBar 就是钉死在折叠态的版本。
+            SmallTopAppBar(
+                title = "扫码登录",
+                // 一律用主题色，不锁死黑：应用支持浅色模式和动态取色，
+                // 写死 Color.Black 在浅色主题下就是一条突兀的黑条。
+                // miuix 的 .background(color) 排在 windowInsetsPadding 之前，
+                // 实色会一直铺到屏幕顶端，状态栏区域由它自己填满——既没有透出后面的边，
+                // 也不会让标题压在相机画面上看不清。相机仍在它下面铺满，只是顶部被盖住。
+                color = MiuixTheme.colorScheme.background,
+                titleColor = MiuixTheme.colorScheme.onSurface,
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = "返回",
+                            tint = MiuixTheme.colorScheme.onSurface,
+                        )
+                    }
+                },
+            )
             Box(
                 modifier = Modifier
+                    .weight(1f)
                     .fillMaxSize()
-                    .padding(padding),
+                    .windowInsetsPadding(WindowInsets.navigationBars),
             ) {
                 when (val s = state) {
-                    is UiState.Scanning -> ScanningContent(onResult = ::onDecoded)
+                    is UiState.Scanning -> Unit   // 已在底层铺好
 
                     is UiState.Notifying -> CenterCard {
                         InfiniteProgressIndicator()
@@ -200,14 +259,34 @@ private fun QrLoginContent(
                         )
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "电脑上应已显示「请在手机上确认」。将用当前账号登录，请确认是你本人操作。",
+                            "确认后，电脑将以此账号登录",
                             textAlign = TextAlign.Center,
                             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                         )
+                        // 把"用哪个账号"摆出来。这是一次授权操作，而原来的文案只说
+                        // "将用当前账号登录"——多账号的人根本无从判断当前是哪个。
+                        accountLabel?.let { label ->
+                            Spacer(Modifier.height(12.dp))
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MiuixTheme.colorScheme.primary.copy(alpha = 0.10f),
+                            ) {
+                                Text(
+                                    label,
+                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                                    style = MiuixTheme.textStyles.body2,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MiuixTheme.colorScheme.primary,
+                                )
+                            }
+                        }
                         Spacer(Modifier.height(20.dp))
                         Button(
                             onClick = { runAuthorize(s.scanned) },
                             modifier = Modifier.fillMaxWidth(),
+                            // 默认 buttonColors 是中性灰，配 onPrimary 的白字几乎看不清，
+                            // 看着还像禁用。主操作要用活力色。
+                            colors = ButtonDefaults.buttonColorsPrimary(),
                         ) {
                             Text("确认登录", color = MiuixTheme.colorScheme.onPrimary)
                         }
@@ -226,6 +305,12 @@ private fun QrLoginContent(
                     }
 
                     is UiState.Success -> CenterCard {
+                        // 到这一步已经没有别的事可做，让它自己收起来，
+                        // 不必让用户为一个纯告知的界面再点一次。按钮保留给手快的人。
+                        LaunchedEffect(Unit) {
+                            kotlinx.coroutines.delay(1600)
+                            onBack()
+                        }
                         StatusIcon(Icons.Filled.CheckCircle, Color(0xFF34C759))
                         Spacer(Modifier.height(16.dp))
                         Text(
@@ -239,7 +324,11 @@ private fun QrLoginContent(
                             color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
                         )
                         Spacer(Modifier.height(20.dp))
-                        Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
+                        Button(
+                            onClick = onBack,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColorsPrimary(),
+                        ) {
                             Text("完成", color = MiuixTheme.colorScheme.onPrimary)
                         }
                     }
@@ -263,13 +352,18 @@ private fun QrLoginContent(
                             Button(
                                 onClick = { state = UiState.Scanning },
                                 modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColorsPrimary(),
                             ) {
                                 Text("重新扫描", color = MiuixTheme.colorScheme.onPrimary)
                             }
                             Spacer(Modifier.height(8.dp))
                             TextButton(text = "返回", onClick = onBack, modifier = Modifier.fillMaxWidth())
                         } else {
-                            Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
+                            Button(
+                                onClick = onBack,
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = ButtonDefaults.buttonColorsPrimary(),
+                            ) {
                                 Text("返回", color = MiuixTheme.colorScheme.onPrimary)
                             }
                         }
@@ -291,6 +385,7 @@ private fun QrLoginContent(
                         Button(
                             onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) },
                             modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.buttonColorsPrimary(),
                         ) {
                             Text("重新授权", color = MiuixTheme.colorScheme.onPrimary)
                         }
@@ -312,20 +407,65 @@ private fun ScanningContent(onResult: (String) -> Unit) {
             modifier = Modifier.fillMaxSize(),
             onResult = onResult,
         )
-        Box(
-            modifier = Modifier
-                .align(Alignment.Center)
-                .size(240.dp)
-                .clip(RoundedCornerShape(20.dp))
-                .background(Color.White.copy(alpha = 0.08f)),
-        )
+        // 取景框：框外压暗 + 四角标记。
+        // 原来只有一块半透明白色方块，既不引导对准，在浅色画面上还几乎看不见。
+        androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+            val side = minOf(size.width, size.height) * 0.62f
+            val left = (size.width - side) / 2f
+            val top = (size.height - side) / 2f
+            val corner = 20.dp.toPx()
+
+            // 挖空的暗层：整屏一块，中间抠掉取景区（EvenOdd）。
+            drawPath(
+                androidx.compose.ui.graphics.Path().apply {
+                    addRect(androidx.compose.ui.geometry.Rect(0f, 0f, size.width, size.height))
+                    addRoundRect(
+                        androidx.compose.ui.geometry.RoundRect(
+                            androidx.compose.ui.geometry.Rect(left, top, left + side, top + side),
+                            androidx.compose.ui.geometry.CornerRadius(corner, corner),
+                        )
+                    )
+                    fillType = androidx.compose.ui.graphics.PathFillType.EvenOdd
+                },
+                Color.Black.copy(alpha = 0.5f),
+            )
+
+            // 四角短线，比整圈描边更轻，也更像"取景器"。
+            val armLen = side * 0.16f
+            val stroke = androidx.compose.ui.graphics.drawscope.Stroke(
+                width = 3.dp.toPx(),
+                cap = androidx.compose.ui.graphics.StrokeCap.Round,
+            )
+            val right = left + side
+            val bottom = top + side
+            listOf(
+                // 每个角两条线：水平、垂直
+                Triple(left + corner, top, left + corner + armLen to top),
+                Triple(left, top + corner, left to top + corner + armLen),
+                Triple(right - corner - armLen, top, right - corner to top),
+                Triple(right, top + corner, right to top + corner + armLen),
+                Triple(left + corner, bottom, left + corner + armLen to bottom),
+                Triple(left, bottom - corner - armLen, left to bottom - corner),
+                Triple(right - corner - armLen, bottom, right - corner to bottom),
+                Triple(right, bottom - corner - armLen, right to bottom - corner),
+            ).forEach { (x, y, end) ->
+                drawLine(
+                    color = Color.White,
+                    start = androidx.compose.ui.geometry.Offset(x, y),
+                    end = androidx.compose.ui.geometry.Offset(end.first, end.second),
+                    strokeWidth = stroke.width,
+                    cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                )
+            }
+        }
         Text(
             "将电脑上的登录二维码放入框内",
             color = Color.White,
             textAlign = TextAlign.Center,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 64.dp)
+                .navigationBarsPadding()
+                .padding(bottom = 72.dp)
                 .fillMaxWidth()
                 .padding(horizontal = 24.dp),
         )
@@ -335,7 +475,13 @@ private fun ScanningContent(onResult: (String) -> Unit) {
 @Composable
 private fun CenterCard(content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
     Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
-        Card(modifier = Modifier.fillMaxWidth()) {
+        // 页面底色是 background，卡片再用默认色就几乎看不出边界。
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(
+                color = MiuixTheme.colorScheme.surface,
+            ),
+        ) {
             Column(
                 modifier = Modifier.fillMaxWidth().padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,

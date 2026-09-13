@@ -14,6 +14,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.FactCheck
+import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.OndemandVideo
 import androidx.compose.material.icons.filled.PlayCircleOutline
 import androidx.compose.runtime.Composable
@@ -75,7 +76,7 @@ fun CourseLinkSections(
     }
 
     val mine = remember(course.courseName, textbooks) {
-        CourseLinks.textbooksFor(course.courseName, textbooks)
+        CourseLinks.textbooksFor(course.courseName, textbooks, course.courseCode)
     }
 
     // ── 教材全文：只按 ISBN 精确查，查不到就没有这个入口 ──
@@ -86,7 +87,7 @@ fun CourseLinkSections(
     val isbnKey = remember(mine) { mine.joinToString(",") { it.isbn } }
     LaunchedEffect(isbnKey) {
         for (t in mine) {
-            val book = CourseLinks.fulltextByIsbn(manager, t.isbn) ?: continue
+            val book = CourseLinks.fulltextByIsbn(manager, t.isbn, byTitle = t.textbookName, byAuthor = t.author) ?: continue
             fulltext = t to book
             break
         }
@@ -122,9 +123,18 @@ fun CourseLinkSections(
         )?.recordOn(course, week)
     }
 
+    // ── 思源学堂：这门课的活动、作业、课件都在那边 ──
+    // 按课程号配，配不上就不给入口——给错课比不给更糟。
+    var lmsCourse by remember(course.courseCode, course.courseName) {
+        mutableStateOf<com.xjtu.toolbox.lms.LmsCourseSummary?>(null)
+    }
+    LaunchedEffect(course.courseCode, course.courseName) {
+        lmsCourse = CourseLinks.lmsCourseFor(manager, course)
+    }
+
     val hasBook = mine.isNotEmpty()
     val hasReplay = replay != null && occurrence != null
-    if (!hasBook && !hasReplay && record == null) return
+    if (!hasBook && !hasReplay && record == null && lmsCourse == null) return
 
     Spacer(Modifier.height(6.dp))
     HorizontalDivider(color = MiuixTheme.colorScheme.dividerLine, thickness = 0.5.dp)
@@ -147,18 +157,41 @@ fun CourseLinkSections(
     }
 
     // ── 教材 ──
+    //
+    // 每本都列，且带上作者、出版社、版次、ISBN、定价。
+    // 之前这里只显示第一本的书名加一句"等 N 本"，而完整的教材信息只在经典布局的
+    // 教材页里有——换到分级布局的用户等于看不到出版社和 ISBN，买书时正需要这两样。
     if (hasBook) {
-        val first = mine.first()
         val ft = fulltext
+        mine.forEach { book ->
+            // 按 ISBN 认，不要用引用相等。教材列表刷新后 mine 里是新的 TextbookItem 实例，
+            // 而 fulltext 里存的还是上一批的对象，=== 永远为假——表现就是
+            // 全文明明查到了，那一行却点不动。
+            val readable = ft != null && sameIsbn(ft.first.isbn, book.isbn)
+            LinkRow(
+                icon = Icons.AutoMirrored.Filled.MenuBook,
+                tint = if (readable) MiuixTheme.colorScheme.primary
+                else MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                title = book.textbookName.ifBlank { "未命名教材" },
+                subtitle = textbookDetail(book, readable),
+                onClick = if (readable && ft != null) {
+                    { onNavigate(Routes.jiaocai1Reader(ft.second.ssno, ft.second.title)) }
+                } else null,
+            )
+        }
+    }
+
+    // 思源学堂。放在回放前面：作业和公告比录播更常被翻。
+    lmsCourse?.let { lc ->
         LinkRow(
-            icon = Icons.AutoMirrored.Filled.MenuBook,
-            tint = if (ft != null) MiuixTheme.colorScheme.primary
-            else MiuixTheme.colorScheme.onSurfaceVariantSummary,
-            title = first.textbookName + if (mine.size > 1) "  等 ${mine.size} 本" else "",
-            subtitle = if (ft != null) "可在线阅读全文" else first.author.takeIf { it.isNotBlank() },
-            onClick = ft?.let {
-                { onNavigate(Routes.jiaocai1Reader(it.second.ssno, it.second.title)) }
-            },
+            icon = Icons.Default.School,
+            tint = MiuixTheme.colorScheme.primary,
+            title = "思源学堂",
+            subtitle = listOfNotNull(
+                lc.name.takeIf { it.isNotBlank() && it != course.courseName },
+                lc.instructors.firstOrNull()?.name?.takeIf { it.isNotBlank() },
+            ).joinToString("  ·  ").ifBlank { "活动、作业与课件" },
+            onClick = { onNavigate(Routes.lmsCourse(lc.id)) },
         )
     }
 
@@ -179,6 +212,34 @@ fun CourseLinkSections(
             )
         }
     }
+}
+
+/**
+ * 教材副行：作者 · 出版社 · 版次 · ¥定价，换行再给 ISBN。
+ *
+ * 占位数据要滤掉——报表里"无教材"的行会带一串 978000000000 的假 ISBN，
+ * 原样显示只会让人以为真有这本书。判据与经典布局的 TextbookCard 保持一致。
+ */
+/** 同一本书的判据：ISBN 去掉连字符空格后相同，且不是空串。 */
+private fun sameIsbn(a: String, b: String): Boolean {
+    fun norm(x: String) = x.filter { it.isDigit() || it.equals('X', ignoreCase = true) }
+    val na = norm(a)
+    return na.length >= 10 && na == norm(b)
+}
+
+private fun textbookDetail(book: TextbookItem, readable: Boolean): String? {
+    val head = listOfNotNull(
+        book.author.trim().takeIf { it.length >= 2 },
+        book.publisher.trim().takeIf { it.isNotBlank() },
+        book.edition.trim().takeIf { it.isNotBlank() },
+        book.price.trim().takeIf { it.isNotBlank() }?.let { "¥$it" },
+    ).joinToString("  ·  ")
+    val isbn = book.isbn.trim().takeIf { it.isNotBlank() && !it.startsWith("978000000000") }
+    return listOfNotNull(
+        head.takeIf { it.isNotBlank() },
+        isbn?.let { "ISBN $it" },
+        if (readable) "可在线阅读全文" else null,
+    ).joinToString("\n").takeIf { it.isNotBlank() }
 }
 
 @Composable
@@ -215,7 +276,9 @@ private fun LinkRow(
                     it,
                     style = MiuixTheme.textStyles.footnote2,
                     color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                    maxLines = 1,
+                    // 教材那一行要放下「作者·出版社·版次·定价」和 ISBN 两行，
+                    // 钉死单行会把 ISBN 直接截掉——正是买书时要抄的那串。
+                    maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                 )
             }

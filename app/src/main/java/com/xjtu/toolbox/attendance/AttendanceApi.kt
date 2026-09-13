@@ -45,6 +45,14 @@ enum class WaterType(val value: Int) {
 
     companion object {
         fun fromValue(v: Int) = entries.firstOrNull { it.value == v } ?: NORMAL
+
+        fun fromCode(code: String?): WaterType = when (code?.trim()?.uppercase()) {
+            "NORMAL", "PRESENT", "1" -> NORMAL
+            "LATE", "2" -> LATE
+            "ABSENCE", "ABSENT", "3" -> ABSENCE
+            "LEAVE", "5" -> LEAVE
+            else -> NORMAL
+        }
     }
 }
 

@@ -169,6 +169,66 @@ class IclassfaceSession : CasSiteSession("iclassface", "快速考勤流水", mus
         com.xjtu.toolbox.iclassface.IclassfaceLogin(session = client, visitorId = visitorId, cachedRsaKey = cachedRsaKey)
 }
 
+// ── NEW ATTENDANCE 新版考勤 kq.xjtu.edu.cn ──────────────────────────────
+
+class NewAttendanceSession : CasSiteSession("new_attendance", "新版考勤", mustUseWebVpn = false) {
+
+    /** 当前账号所属的考勤站点根地址（本科 bk-kq / 研究生 kq），登录成功时写入。 */
+    fun baseUrl(): String =
+        localToken[BASE_URL_KEY] ?: com.xjtu.toolbox.newattendance.NewAttendanceLogin.BASE_URL
+
+    override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
+        com.xjtu.toolbox.newattendance.NewAttendanceLogin(
+            session = client,
+            visitorId = visitorId,
+            cachedRsaKey = cachedRsaKey,
+        )
+
+    override fun onLoginSuccess(login: XJTULogin) {
+        val kq = login as? com.xjtu.toolbox.newattendance.NewAttendanceLogin
+        val token = kq?.authToken
+        if (!token.isNullOrBlank()) localToken["business_token"] = token
+        // 本科与研究生是两套部署（bk-kq / kq），业务请求必须打到签发令牌的那一套。
+        kq?.resolvedBaseUrl?.let { localToken[BASE_URL_KEY] = it }
+    }
+
+    override fun decorateRequest(builder: Request.Builder): Request.Builder {
+        localToken["business_token"]?.let { builder.header(com.xjtu.toolbox.newattendance.NewAttendanceLogin.TOKEN_HEADER, it) }
+        return builder
+    }
+
+    override fun isAuthFailureResponse(response: Response, bodyPreview: String?): Boolean {
+        if (super.isAuthFailureResponse(response, bodyPreview)) return true
+        val preview = bodyPreview ?: return false
+        if (Regex("\"code\"\\s*:\\s*4001").containsMatchIn(preview)) return true
+        return preview.contains("业务令牌") && (
+            preview.contains("过期") || preview.contains("无效") || preview.contains("未登录")
+        )
+    }
+
+    override suspend fun validateLogin(): Boolean = withIo {
+        val token = localToken["business_token"] ?: return@withIo false
+        val resp = client.newCall(
+            Request.Builder()
+                .url("${baseUrl()}/student/home")
+                .header(com.xjtu.toolbox.newattendance.NewAttendanceLogin.TOKEN_HEADER, token)
+                .get()
+                .build()
+        ).execute()
+        try {
+            if (resp.code != 200) return@withIo false
+            val body = resp.body?.string() ?: return@withIo false
+            if (XJTULogin.isAuthFailureResponse(body)) return@withIo false
+            body.safeParseJsonObject().get("code")?.takeIf { !it.isJsonNull }?.asInt == 0
+        } finally {
+            resp.close()
+        }
+    }
+}
+
+/** [NewAttendanceSession.localToken] 里存考勤站点根地址的键。 */
+const val BASE_URL_KEY = "kq_base_url"
+
 // ── HELLO 迎新/个人信息 ────────────────────────────────────────────────
 
 /**

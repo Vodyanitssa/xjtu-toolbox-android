@@ -2,7 +2,9 @@ package com.xjtu.toolbox.zyxf
 
 import android.util.Log
 import okhttp3.OkHttpClient
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
@@ -26,6 +28,20 @@ object ZyxfApi {
     const val SITE = "https://zyxf.top"
     private const val API = "$SITE/api"
 
+    /**
+     * 能走 WebOffice 在线预览的扩展名。
+     *
+     * 与服务端 `extPolicy.js` 的 PREVIEWABLE_EXTS 对齐（允许上传的类型减去压缩包）。
+     * 这里多留一份是为了在点开之前就知道该不该给"预览"入口——
+     * 不然只能先打一次请求再拿 415 回来，白占人家的限流配额。
+     */
+    private val PREVIEWABLE_EXTS = setOf(
+        "doc", "dot", "wps", "wpt", "docx", "dotx", "rtf",
+        "ppt", "pptx", "ppsx", "pps", "potx", "dpt", "dps",
+        "xls", "xlt", "et", "xlsx", "xltx", "csv",
+        "pdf", "txt",
+    )
+
     /** 能直接读成文字的扩展名。其余一律只给链接。 */
     private val TEXT_EXTS = setOf("txt", "csv", "md", "markdown", "tex", "json", "log")
 
@@ -47,7 +63,24 @@ object ZyxfApi {
         val isFolder: Boolean,
         val sizeBytes: Long = 0,
         val ext: String = "",
+        /** 上传时间，毫秒。服务端 `created_at` 是 INTEGER 秒级；0 表示没拿到。 */
+        val createdAt: Long = 0,
     ) {
+        /** 「3天前」这种相对时间。太久远的直接给日期，省得用户心算。 */
+        val timeText: String
+            get() {
+                if (createdAt <= 0) return ""
+                val days = (System.currentTimeMillis() - createdAt) / 86_400_000L
+                return when {
+                    days < 0 -> ""
+                    days == 0L -> "今天"
+                    days == 1L -> "昨天"
+                    days < 30 -> "${days}天前"
+                    else -> java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.CHINA)
+                        .format(java.util.Date(createdAt))
+                }
+            }
+
         val extNormalized: String get() = ext.lowercase().removePrefix(".")
         val readable: Boolean get() = !isFolder && extNormalized in TEXT_EXTS
 
@@ -97,7 +130,21 @@ object ZyxfApi {
         name = o.optString("name"),
         path = o.optString("folder_path", ""),
         isFolder = true,
+        createdAt = epochMillis(o),
     )
+
+    /**
+     * 服务端 `created_at` 是 INTEGER。历史数据里秒和毫秒都出现过，
+     * 按量级判断——2001 年以后的毫秒时间戳都大于 1e12，而秒级要到公元 33658 年才够。
+     */
+    private fun epochMillis(o: JSONObject): Long {
+        val raw = o.optLong("created_at", 0L)
+        return when {
+            raw <= 0L -> 0L
+            raw > 1_000_000_000_000L -> raw
+            else -> raw * 1000L
+        }
+    }
 
     private fun fileOf(o: JSONObject) = Entry(
         id = o.optInt("id"),
@@ -106,6 +153,7 @@ object ZyxfApi {
         isFolder = false,
         sizeBytes = o.optLong("size"),
         ext = o.optString("ext", ""),
+        createdAt = epochMillis(o),
     )
 
     private fun JSONArray?.mapObjects(block: (JSONObject) -> Entry): List<Entry> {
@@ -124,13 +172,30 @@ object ZyxfApi {
         )
     }
 
+    /** 排序字段。与服务端 `SORT_FIELDS` 一一对应，别自造。 */
+    enum class Sort(val key: String, val label: String) {
+        /** 管理员手工排的顺序，也是网页版的默认。 */
+        MANUAL("manual", "默认"),
+        NAME("name", "名称"),
+        TIME("created_at", "时间"),
+        SIZE("size", "大小"),
+    }
+
     /**
      * 列出一个目录。
      *
+     * 排序交给服务端做（`?sort=&order=`）：目录内容可能很多，而接口本来就支持，
+     * 本地再排一遍既多余，也会和"默认顺序"（管理员手工排的 sort_order）对不上。
+     *
      * @param folderId 0 表示根目录（后端就是这么约定的，不是"缺省值"）
      */
-    fun listFolder(folderId: Int = 0): List<Entry> {
-        val json = JSONObject(get("$API/folders/$folderId/contents"))
+    fun listFolder(
+        folderId: Int = 0,
+        sort: Sort = Sort.MANUAL,
+        desc: Boolean = false,
+    ): List<Entry> {
+        val q = "?sort=${sort.key}&order=" + if (desc) "desc" else "asc"
+        val json = JSONObject(get("$API/folders/$folderId/contents$q"))
         return json.optJSONArray("folders").mapObjects(::folderOf) +
             json.optJSONArray("files").mapObjects(::fileOf)
     }
@@ -180,8 +245,62 @@ object ZyxfApi {
             userAgent = null,
             cookie = null,
             referer = null,
+            // 接口给的名字是干净的 UTF-8，比从 latin-1 的响应头里猜可靠。
+            trustFallbackName = true,
         )
     }
+
+    /**
+     * WebOffice 预览凭证。
+     *
+     * 服务端转发阿里云 IMM 的 GenerateWebofficeToken，返回一个 `WebofficeURL` 加一枚
+     * 30 分钟有效的 access token；真正把 doc/ppt/pdf 渲染出来的是阿里云的 JS-SDK，
+     * 不是资料站也不是我们。所以预览这一层**只能在 WebView 里跑**，
+     * 我们借的就是这套解析渲染。
+     */
+    data class Weboffice(
+        val url: String,
+        val token: String,
+        val refreshToken: String,
+    )
+
+    /** 取预览凭证。415 表示这个类型本来就不支持预览（压缩包之类）。 */
+    fun webofficeToken(fileId: Int): Weboffice? = runCatching {
+        val json = JSONObject(get("$API/files/$fileId/weboffice-token"))
+        val url = json.optString("url")
+        val token = json.optString("token")
+        if (url.isBlank() || token.isBlank()) null
+        else Weboffice(url, token, json.optString("refresh_token"))
+    }.onFailure { Log.w(TAG, "weboffice token failed: $fileId", it) }.getOrNull()
+
+    /**
+     * 续期预览凭证。
+     *
+     * access token 只活 30 分钟，SDK 会在到期前回调续期；refresh token 活一天，
+     * 它也过期时返回 null，调用方重新 [webofficeToken] 即可。
+     */
+    fun webofficeRefresh(fileId: Int, accessToken: String, refreshToken: String): Weboffice? = runCatching {
+        val payload = JSONObject().apply {
+            put("access_token", accessToken)
+            put("refresh_token", refreshToken)
+        }
+        val req = Request.Builder()
+            .url("$API/files/$fileId/weboffice-refresh")
+            .header("Accept", "application/json")
+            .header("Referer", "$SITE/")
+            .post(payload.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        client.newCall(req).execute().use { resp ->
+            val body = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) return null
+            val json = JSONObject(body)
+            Weboffice("", json.optString("token"), json.optString("refresh_token"))
+        }
+    }.onFailure { Log.w(TAG, "weboffice refresh failed: $fileId", it) }.getOrNull()
+
+    /** 这个类型能不能走 WebOffice 预览。和服务端 PREVIEWABLE_EXTS 保持一致。 */
+    fun previewable(ext: String): Boolean =
+        ext.lowercase().removePrefix(".") in PREVIEWABLE_EXTS
 
     /**
      * 把纯文本资料读成字符串，最多 [MAX_TEXT_BYTES]。

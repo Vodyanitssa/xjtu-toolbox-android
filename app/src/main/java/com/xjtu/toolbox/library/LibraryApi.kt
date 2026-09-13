@@ -158,6 +158,12 @@ class LibraryApi(private val site: SiteSession) {
          * 座位号正则：匹配字母前缀的 (C08, Y003) 和纯数字零开头的 (002, 019)。
          * 东南侧/西南侧的座位是纯数字编号，没有字母前缀。
          */
+        /** `showConfirmModal('文案', 'ruguan1', '4953117')` 的动作名与 reserve id。 */
+        val CONFIRM_MODAL_REGEX =
+            Regex("""showConfirmModal\s*\(\s*['"][^'"]*['"]\s*,\s*['"](\w+)['"]\s*,\s*['"](\d+)['"]\s*\)""")
+
+        val RESERVE_ID_IN_URL = Regex("""[?&]ri=(\d+)""")
+
         val SEAT_ID_REGEX = Regex("""(?:[A-Z]\d{2,4}|\b\d{3}\b)""")
 
         /**
@@ -231,6 +237,40 @@ class LibraryApi(private val site: SiteSession) {
 
     /** 区域码 → 所在楼层码。`qseat` 之前要先 `qspace` 定位楼层，这张表就是给它用的。 */
     private val learnedAreaFloors = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * 已经把哪个校区的所有楼层都学过了。
+     *
+     * [knownAreaNames] 平时只含用户翻过的那几层，拿它判断"这个区域是不是本校区的"
+     * 会把没翻过的楼层误判成外校区。预热过之后才敢下这个结论。
+     */
+    @Volatile
+    private var warmedCampus: LibraryCampus? = null
+
+    /**
+     * 把一个校区所有楼层的区域名一次学完。
+     *
+     * 代价是每校区 2~4 个 JSON 请求，只在切校区后跑一次；顺带让翻楼层时区域标签
+     * 立刻就有，不用等那一层的请求回来。
+     */
+    fun warmCampusAreas(campus: LibraryCampus) {
+        if (warmedCampus == campus) return
+        campus.floorCodes.forEach { runCatching { getFloorAreas(it) } }
+        warmedCampus = campus
+        Log.d(TAG, "warmCampusAreas(${campus.displayName}): ${learnedAreaNames.size} areas")
+    }
+
+    /**
+     * 这个区域名**确定**不属于当前校区吗？
+     *
+     * 只有预热完成后才会给出 true——没预热就说"不认识"，那是在拿无知当证据。
+     * 用于拦下跨校区换座：预约绑在账号的 rplace 上，换到另一个校区的座位服务端
+     * 不会照办，只会把请求晾在那儿直到超时。
+     */
+    fun isForeignArea(areaName: String?): Boolean {
+        if (areaName.isNullOrBlank() || warmedCampus == null) return false
+        return areaName !in knownAreaNames()
+    }
 
     /** 已知区域码：学到的 + 兴庆静态表。 */
     fun knownAreaCodes(): Set<String> = learnedAreaNames.keys + AREA_MAP.values
@@ -331,6 +371,7 @@ class LibraryApi(private val site: SiteSession) {
                 learnedAreaNames.clear()
                 learnedAreaFloors.clear()
                 cachedAreaStats = emptyMap()
+                warmedCampus = null
             }
             ok
         }
@@ -340,8 +381,11 @@ class LibraryApi(private val site: SiteSession) {
     }
 
     /**
-     * 带有界超时的派生 client：复用底层 cookieJar / interceptor（含 WebVPN），
-     * 仅追加 callTimeout，避免座位请求在弱网下长时间卡转圈（默认 client 是 25-30s）。
+     * 座位接口的通用请求头。
+     *
+     * 注意这里**没有**设任何超时，走的是 site.client 的默认值（25-30s）。
+     * 所以别在一条用户操作里串太多请求——换座那条链路曾经串到 7 个，
+     * 撞上服务端不响应时，用户看到的就是等了好几分钟然后"超时"。
      */
     private fun buildRequest(url: String, ajax: Boolean = false, referer: String = "$BASE_URL/seat/"): Request {
         val b = Request.Builder().url(url)
@@ -640,7 +684,15 @@ class LibraryApi(private val site: SiteSession) {
 
                 if ("Not Found" in bodyText && bodyText.length < 800) continue
 
-                // 检查有无预约内容（座位号 + 预约状态）
+                // ① 结构化解析优先。页面模板认得出来（有 well / notwell 卡）时，它的结论
+                //    就是最终结论——包括"没有预约"，不再往下试别的 URL，也不再猜文本。
+                if (doc.selectFirst("div.well, div.notwell") != null) {
+                    val structured = parseBookingCard(doc, html, finalUrl)
+                    Log.d(TAG, "getMyBooking: structured -> ${structured?.seatId ?: "无预约"}")
+                    return structured
+                }
+
+                // ② 模板不认识，退回文本启发式。
                 val hasSeatId = SEAT_ID_REGEX.containsMatchIn(bodyText)
                 val hasStatus = "预约状态" in bodyText
 
@@ -668,6 +720,89 @@ class LibraryApi(private val site: SiteSession) {
 
         Log.d(TAG, "getMyBooking: no booking found across all candidate URLs")
         return null
+    }
+
+    /**
+     * 按 `/my/` 页的 DOM 结构解析当前预约。
+     *
+     * 之前这里是「全文正则找座位号」，而 [SEAT_ID_REGEX] 是照兴庆的编号写的（`A101` / `002`）。
+     * 创新港、雁塔的编号对不上，于是：认不出座位号 → 页面里又没有"暂无预约"字样 →
+     * 三个候选 URL 全部落空 → 永远显示"暂无预约"。换座后拿它复核，自然也永远判成
+     * "换座未生效"，哪怕座位其实已经换成功了——红叉和"暂无预约"是同一个根因。
+     *
+     * 改成认模板而不是认数据：模板全校一套，数据每个校区都不同。
+     * - 当前预约是 `div.well`，历史记录是 `div.notwell`；没有 well 卡就是真的没有预约；
+     * - 座位行是卡内第一个 `<hr>` 的**尾随文本**，固定为 `区域名&nbsp;座位号`；
+     * - 状态是 `.cta-button` 里第一个无 class 的 `<h3>`。
+     *
+     * 结构判据取自 yan-xiaoo/XJTUToolBox 对该页面的实测（`library/seats.py`）。
+     */
+    private fun parseBookingCard(
+        doc: org.jsoup.nodes.Document,
+        html: String,
+        finalUrl: String,
+    ): MyBookingInfo? {
+        val card = doc.selectFirst("div.well") ?: return null
+
+        // Jsoup 没有 lxml 的 .tail，尾随文本就是 <hr> 的下一个兄弟文本节点。
+        // 必须用 wholeText：text() 会把 &nbsp; 规范化掉，而我们正是靠它切分区域名和座位号。
+        val hr = card.selectFirst("hr") ?: return null
+        val tail = (hr.nextSibling() as? org.jsoup.nodes.TextNode)?.wholeText?.trim().orEmpty()
+        if (tail.isBlank()) return null
+
+        // NBSP 不算 Kotlin 认的空白字符，上面的 trim() 不会把它吃掉。
+        val nbsp = '\u00a0'
+        val area: String?
+        val seatId: String
+        if (nbsp in tail) {
+            area = tail.substringBeforeLast(nbsp).trim().ifBlank { null }
+            seatId = tail.substringAfterLast(nbsp).trim()
+        } else {
+            // 结构对了但分隔符不是 NBSP（模板微调过）。别把整行当座位号，
+            // 退一步按空白切最后一段。
+            area = tail.substringBeforeLast(' ').trim().ifBlank { null }
+            seatId = tail.substringAfterLast(' ').trim()
+        }
+        if (seatId.isBlank()) return null
+
+        val status = card.selectFirst("div.cta-button h3:not([class])")?.text()?.trim()
+            ?.takeIf { it.isNotBlank() }
+
+        val actions = parseActionsFromHtml(doc, html)
+            .ifEmpty { actionsFromConfirmModal(html, finalUrl) }
+        Log.d(TAG, "parseBookingCard: seat=$seatId area=$area status=$status actions=${actions.keys}")
+        return MyBookingInfo(seatId, area, status, actions)
+    }
+
+    /**
+     * 从整页 HTML 里直接扫 `showConfirmModal('确认您已到馆?', 'ruguan1', '4953117')`。
+     *
+     * [parseActionsFromHtml] 按控件文案认按钮，文案一改就抓瞎；这里认的是 JS 调用本身，
+     * 只依赖 action 名和 reserve id 两个稳定量。页面按当前状态只渲染可执行的按钮，
+     * 所以出现了哪个就给哪个，不要替它补全。
+     */
+    private fun actionsFromConfirmModal(html: String, finalUrl: String): MutableMap<String, String> {
+        val normalized = org.jsoup.parser.Parser.unescapeEntities(html, false)
+        val out = mutableMapOf<String, String>()
+        CONFIRM_MODAL_REGEX.findAll(normalized).forEach { m ->
+            val action = m.groupValues[1]
+            val reserveId = m.groupValues[2]
+            val label = when (action) {
+                "cancel" -> "取消预约"
+                "ruguan1" -> "入馆签到"
+                "leave", "midleave" -> "中途离开"
+                "return", "midreturn" -> "中途返回"
+                else -> null
+            } ?: return@forEach
+            buildActionUrl(action, reserveId)?.let { out[label] = it }
+        }
+        if (out.isEmpty()) {
+            // 页面没内联 JS（有的模板把 ri 放在地址上），退一步从 URL 里取。
+            RESERVE_ID_IN_URL.find(finalUrl)?.groupValues?.get(1)?.let { ri ->
+                buildActionUrl("cancel", ri)?.let { out["取消预约"] = it }
+            }
+        }
+        return out
     }
 
     /**

@@ -252,15 +252,30 @@ fun SemesterCourseList(
     textbooks: List<TextbookItem>,
     onCourseClick: (CourseItem) -> Unit,
     bottomPadding: Dp = 0.dp,
+    /** 整学期的考试。分级布局没有独立的「考试」页，它们排在课程列表前面。 */
+    exams: List<ExamItem> = emptyList(),
 ) {
     // 同一门课一周上两次会有两条记录，按课程号合并，周次取并集。
     val merged = remember(courses) {
         courses.groupBy { it.courseCode.ifBlank { it.courseName } }
             .values
-            .map { group -> group.first() to group.flatMap { it.getWeeks() }.distinct().sorted() }
-            .sortedBy { it.first.courseName }
+            .map { group ->
+                SemesterRow(
+                    course = group.first(),
+                    weeks = group.flatMap { it.getWeeks() }.distinct().sorted(),
+                    // 一门课一周可能上两次（周一 1-2 节、周三 3-4 节）。只取 first()
+                    // 会把另一次悄悄丢掉，整学期视图里本来就该看得到全部时段。
+                    slots = group.map { it.dayOfWeek to (it.startSection to it.endSection) }
+                        .distinct()
+                        .sortedWith(compareBy({ it.first }, { it.second.first })),
+                )
+            }
+            .sortedBy { it.course.courseName }
     }
-    if (merged.isEmpty()) {
+    // 按日期排好的考试。没有日期的排最后，不猜。
+    val sortedExams = remember(exams) { exams.sortedBy { it.examDate.ifBlank { "9999" } } }
+
+    if (merged.isEmpty() && sortedExams.isEmpty()) {
         Box(Modifier.fillMaxSize().padding(bottom = bottomPadding), Alignment.Center) {
             Text(
                 "本学期没有课程数据",
@@ -277,14 +292,22 @@ fun SemesterCourseList(
         ),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        items(merged) { (course, weeks) ->
-            val books = remember(course.courseName, textbooks) {
-                CourseLinks.textbooksFor(course.courseName, textbooks)
+        if (sortedExams.isNotEmpty()) {
+            item { SectionLabel("考试安排 · ${sortedExams.size} 场") }
+            items(sortedExams) { exam -> ExamRowCard(exam) }
+            if (merged.isNotEmpty()) item { SectionLabel("本学期课程 · ${merged.size} 门") }
+        }
+        items(merged) { row ->
+            val course = row.course
+            val books = remember(course.courseName, course.courseCode, textbooks) {
+                CourseLinks.textbooksFor(course.courseName, textbooks, course.courseCode)
             }
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 cornerRadius = 14.dp,
-                colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surface),
+                // 页面底色就是 surface，卡片再用 surface 就等于没有卡片——
+                // 看上去是一堆字直接浮在背景上。全 app 的卡片都用 surfaceVariant。
+                colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceVariant),
                 onClick = { onCourseClick(course) },
             ) {
                 Column(Modifier.padding(14.dp)) {
@@ -294,13 +317,27 @@ fun SemesterCourseList(
                         fontWeight = FontWeight.Bold,
                         color = MiuixTheme.colorScheme.onSurface,
                     )
+                    // 第一行给上课时间——整学期视图里这是最常被问的（"这课周几"），
+                    // 之前只有老师、地点、周次，恰恰缺了它。
+                    val slotLine = row.slots.joinToString("，") { (dow, sec) ->
+                        "周${DOW_NAMES.getOrElse(dow) { "?" }} ${sec.first}-${sec.second}节"
+                    }
+                    if (slotLine.isNotBlank()) {
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            slotLine,
+                            style = MiuixTheme.textStyles.footnote1,
+                            fontWeight = FontWeight.Medium,
+                            color = MiuixTheme.colorScheme.onSurface,
+                        )
+                    }
                     val line = listOfNotNull(
                         course.teacher.takeIf { it.isNotBlank() },
                         course.location.takeIf { it.isNotBlank() },
-                        weeks.takeIf { it.isNotEmpty() }?.let { "${compactWeeks(it)}周" },
+                        row.weeks.takeIf { it.isNotEmpty() }?.let { "${compactWeeks(it)}周" },
                     ).joinToString("  ·  ")
                     if (line.isNotBlank()) {
-                        Spacer(Modifier.height(3.dp))
+                        Spacer(Modifier.height(2.dp))
                         Text(
                             line,
                             style = MiuixTheme.textStyles.footnote1,
@@ -323,6 +360,107 @@ fun SemesterCourseList(
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** 学期一级的一行：一门课 + 它这学期的全部时段和周次。 */
+private data class SemesterRow(
+    val course: CourseItem,
+    val weeks: List<Int>,
+    /** (星期, (起始节, 结束节))，已按星期、节次排序。 */
+    val slots: List<Pair<Int, Pair<Int, Int>>>,
+)
+
+private val DOW_NAMES = listOf("", "一", "二", "三", "四", "五", "六", "日")
+
+/** 分组标题。列表里没有分隔时，考试和课程会糊成一片。 */
+@Composable
+private fun SectionLabel(text: String) {
+    Text(
+        text,
+        style = MiuixTheme.textStyles.footnote1,
+        fontWeight = FontWeight.Bold,
+        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+        modifier = Modifier.padding(start = 4.dp, top = 6.dp, bottom = 2.dp),
+    )
+}
+
+/**
+ * 一场考试。
+ *
+ * 用 error 色系而不是普通卡片色：这一屏里考试是唯一"错过就没了"的东西，
+ * 和几十门课长一个样就等于没标出来。座位号单独给一个角标——进考场前要找的就是它。
+ */
+@Composable
+private fun ExamRowCard(exam: ExamItem) {
+    val accent = MiuixTheme.colorScheme.error
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        cornerRadius = 14.dp,
+        colors = CardDefaults.defaultColors(color = accent.copy(alpha = 0.10f)),
+    ) {
+        Row(
+            Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    exam.courseName,
+                    style = MiuixTheme.textStyles.body1,
+                    fontWeight = FontWeight.Bold,
+                    color = MiuixTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                val when_ = listOfNotNull(
+                    exam.examDate.takeIf { it.isNotBlank() },
+                    exam.examTime.takeIf { it.isNotBlank() },
+                ).joinToString("  ")
+                if (when_.isNotBlank()) {
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        when_,
+                        style = MiuixTheme.textStyles.footnote1,
+                        color = accent,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+                exam.location.takeIf { it.isNotBlank() }?.let {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        it,
+                        style = MiuixTheme.textStyles.footnote1,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            exam.seatNumber.takeIf { it.isNotBlank() }?.let { seat ->
+                Spacer(Modifier.width(10.dp))
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = accent.copy(alpha = 0.16f),
+                ) {
+                    Column(
+                        Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Text(
+                            "座位",
+                            style = MiuixTheme.textStyles.footnote2,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        )
+                        Text(
+                            seat,
+                            style = MiuixTheme.textStyles.body2,
+                            fontWeight = FontWeight.Bold,
+                            color = accent,
+                        )
                     }
                 }
             }

@@ -50,6 +50,15 @@ object ZyxfDownloader {
         cookie: String?,
         referer: String? = "https://zyxf.top/",
         category: String = LmsDownloadStore.CATEGORY_ZYXF,
+        /**
+         * [fallbackName] 是不是权威名字。
+         *
+         * 走接口下载时文件名来自资料站 JSON（干净的 UTF-8），比从响应头里猜可靠得多——
+         * HTTP 头按规范是 latin-1，OSS 回的中文名到了 OkHttp 手里就是
+         * `ç¬¬äºç«  æµä½éåå­¦.pdf` 这种乱码。这种情况下别再去解析头。
+         * WebView 那条路拿不到元数据，只能猜，所以默认仍是 false。
+         */
+        trustFallbackName: Boolean = false,
     ): String? {
         return try {
             val req = Request.Builder()
@@ -76,7 +85,11 @@ object ZyxfDownloader {
                     ?.trim()
                     .orEmpty()
 
-                val name = fileNameOf(disposition, url, fallbackName)
+                val name = if (trustFallbackName && fallbackName.isNotBlank()) {
+                    fallbackName.sanitized()
+                } else {
+                    fileNameOf(disposition, url, fallbackName)
+                }
                 val bytes = resp.body?.bytes() ?: return null
                 // 验证码页 / 挑战页也是 200。存成「附件.docx」用户只会看到打不开。
                 if (isHtmlDisguisedAsFile(mime, disposition, bytes)) {
@@ -114,7 +127,7 @@ object ZyxfDownloader {
                 }
             Regex("""filename\s*=\s*"?([^";]+)"?""", RegexOption.IGNORE_CASE)
                 .find(d)?.groupValues?.get(1)?.trim()
-                ?.takeIf { it.isNotBlank() }?.let { return it.sanitized() }
+                ?.takeIf { it.isNotBlank() }?.let { return it.repairEncoding().sanitized() }
         }
         url.substringAfterLast('/').substringBefore('?')
             .takeIf { it.isNotBlank() }
@@ -123,6 +136,29 @@ object ZyxfDownloader {
                 return decoded.sanitized()
             }
         return fallback.ifBlank { "download_${System.currentTimeMillis()}" }.sanitized()
+    }
+
+    /**
+     * 修复响应头里的中文名。
+     *
+     * HTTP 头按规范是 ISO-8859-1，服务端直接塞 UTF-8 字节时，解析方会逐字节当 latin-1
+     * 解出来，于是「第二章」变成「ç¬¬äºç« 」。把字符按 latin-1 写回字节再按 UTF-8 读，
+     * 就能还原。顺带处理百分号编码。
+     *
+     * 只在"还原后确实是合法 UTF-8 且含非 ASCII"时才采用——否则本来就正常的
+     * 纯英文名会被这一步改坏。
+     */
+    private fun String.repairEncoding(): String {
+        val percentDecoded = if ('%' in this) {
+            runCatching { URLDecoder.decode(this, "UTF-8") }.getOrDefault(this)
+        } else {
+            this
+        }
+        if (percentDecoded.none { it.code in 0x80..0xFF }) return percentDecoded
+        val bytes = percentDecoded.map { it.code.toByte() }.toByteArray()
+        val utf8 = runCatching { bytes.toString(Charsets.UTF_8) }.getOrNull() ?: return percentDecoded
+        // 解码失败时 UTF-8 会填充 U+FFFD；出现它就说明原文不是被误读的 UTF-8。
+        return if ('\uFFFD' in utf8) percentDecoded else utf8
     }
 
     private fun String.sanitized(): String =

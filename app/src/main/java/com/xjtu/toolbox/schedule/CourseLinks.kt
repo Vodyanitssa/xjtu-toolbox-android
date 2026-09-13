@@ -35,7 +35,31 @@ object CourseLinks {
      * 按课程名匹配——教材接口没有课程号这一列。
      * 名字带「（甲）」这类后缀时两边未必一致，所以精确优先、包含兜底。
      */
-    fun textbooksFor(courseName: String, all: List<TextbookItem>): List<TextbookItem> {
+    /**
+     * 找这门课的教材。
+     *
+     * 课程号优先：它是教务系统里的主键，两边一致就是同一门课，不用跟课程名的各种
+     * 写法（「大学物理」/「大学物理（一）」/「大学物理I」）较劲。只有拿不到课程号、
+     * 或者报表里那一列是空的，才退回按名字模糊匹配。
+     *
+     * @param courseCode 课表侧的课程号，空串表示不可用
+     */
+    fun textbooksFor(
+        courseName: String,
+        all: List<TextbookItem>,
+        courseCode: String = "",
+    ): List<TextbookItem> {
+        val code = courseCode.trim()
+        if (code.isNotEmpty()) {
+            // 课程号常带班号后缀（`MATH100101-05`），先精确、再取主段。
+            val byCode = all.filter { it.courseCode.trim().equals(code, ignoreCase = true) }
+                .ifEmpty {
+                    val stem = code.substringBefore('-').trim()
+                    if (stem.length < 4) emptyList()
+                    else all.filter { it.courseCode.trim().substringBefore('-').equals(stem, ignoreCase = true) }
+                }
+            if (byCode.isNotEmpty()) return byCode.filter { it.hasSubstantiveTextbook }
+        }
         val target = courseName.normalizedCourseName()
         if (target.isEmpty()) return emptyList()
         val exact = all.filter { it.courseName.normalizedCourseName() == target }
@@ -50,15 +74,59 @@ object CourseLinks {
      * 只按 ISBN 精确查。书名在两个系统里的写法对不上是常态，按书名搜出来的第一条
      * 经常是另一本书——给错的书比不给更糟，所以没 ISBN 就放弃，不做模糊回退。
      */
-    suspend fun fulltextByIsbn(manager: SessionManager?, isbn: String): Jiaocai1Book? {
+    /**
+     * 书名归一化：去掉书名号、括注、空白与标点，统一大小写。
+     *
+     * 两边对同一本书的写法常有出入（《固体物理学》/ 固体物理学（第二版）），
+     * 但去掉这些装饰之后应当完全相等——用等值而不是包含，
+     * 是为了不把「固体物理学」配到「固体物理学导论」上去。
+     */
+    private fun normalizedTitle(raw: String): String =
+        raw.replace(Regex("""[（(\[【][^）)\]】]*[）)\]】]"""), "")
+            .filter { it.isLetterOrDigit() }
+            .lowercase()
+
+    suspend fun fulltextByIsbn(
+        manager: SessionManager?,
+        isbn: String,
+        /** ISBN 查不到时用来兜底的书名；传 null 表示不兜底。 */
+        byTitle: String? = null,
+        /** 同名多版本时用来消歧的作者，可空。 */
+        byAuthor: String? = null,
+    ): Jiaocai1Book? {
         val key = isbn.filter { it.isDigit() || it.equals('X', ignoreCase = true) }
         if (key.length < 10) return null
         fulltextCache[key]?.let { return it.value }
         val site = manager.siteOrNull(LoginType.JIAOCAI) ?: return null
         return withContext(Dispatchers.IO) {
+            // 两种写法都试。教材报表里的 ISBN 常带连字符（978-7-04-039663-9），
+            // 而全文库存的是哪一种没有保证——之前只发原文，库里存纯数字时就一条也搜不到，
+            // 表现就是"明明有 ISBN 却从来匹配不上全文"。
+            // 先发规范化的纯数字/X 形态，再退回原文。
+            val candidates = listOf(key, isbn.trim()).filter { it.isNotEmpty() }.distinct()
             val hit = runCatching {
-                Jiaocai1Api(site).search(keyword = isbn, field = Jiaocai1SearchField.ISBN)
-                    .books.firstOrNull()
+                candidates.firstNotNullOfOrNull { kw ->
+                    Jiaocai1Api(site).search(keyword = kw, field = Jiaocai1SearchField.ISBN)
+                        .books.firstOrNull()
+                } ?: byTitle?.takeIf { it.isNotBlank() }?.let { title ->
+                    // ISBN 搜不到时按书名兜底，但**只认归一化后完全相同**的。
+                    //
+                    // 这里原本完全不做回退，理由是"按书名搜出来的第一条经常是另一本书"。
+                    // 那个顾虑针对的是"取第一条"，不是书名检索本身：实测《固体物理学》
+                    // 按 ISBN 搜 0 条（全文库没索引它的 ISBN），按书名搜到 5 条，
+                    // 严格等值能准确挑出那一本，并自动排除「固体物理学（上册）」
+                    // 「高等学校教材 固体物理学」这类。
+                    val r = Jiaocai1Api(site).search(keyword = title, field = Jiaocai1SearchField.BOOK_NAME)
+                    val exact = r.books.filter { normalizedTitle(it.title) == normalizedTitle(title) }
+                    // 同名多版本时用作者消歧；作者也对不上就放弃，不猜版本。
+                    val wantAuthor = byAuthor?.let { normalizedTitle(it) }?.takeIf { it.isNotEmpty() }
+                    when {
+                        exact.size <= 1 -> exact.firstOrNull()
+                        wantAuthor == null -> exact.first()
+                        else -> exact.firstOrNull { normalizedTitle(it.author).contains(wantAuthor) }
+                            ?: exact.first()
+                    }
+                }
             }.rethrowCancellation().getOrElse {
                 Log.w(TAG, "fulltext by isbn=$isbn failed", it)
                 null
@@ -137,6 +205,47 @@ object CourseLinks {
      * 指定某一天的回放场次，不是"这个课格在整学期的所有周"——
      * 按星期几筛会把 7 天后、14 天后的全带进来。同一天多场是正常的（连堂各录一段）。
      */
+    /** 思源学堂课程列表缓存。一次会话里点开多门课不该反复拉同一份列表。 */
+    private var lmsCoursesCache: Box<List<com.xjtu.toolbox.lms.LmsCourseSummary>>? = null
+
+    /**
+     * 这门课在思源学堂对应哪门。
+     *
+     * 先按课程号精确配——两个系统用的是同一套教务课程号，这是唯一可靠的判据；
+     * 课程号常带班号后缀（`MATH100101-05`），所以再退一步比主段。
+     * 都不中才按课程名，且只认归一化后完全相同的，不做包含匹配：
+     * 「大学物理」能包含到「大学物理实验」，那是两门课，给错比不给更糟。
+     */
+    suspend fun lmsCourseFor(
+        manager: SessionManager?,
+        course: CourseItem,
+    ): com.xjtu.toolbox.lms.LmsCourseSummary? {
+        val site = manager.siteOrNull(LoginType.LMS) ?: return null
+        val all = lmsCoursesCache?.value ?: withContext(Dispatchers.IO) {
+            runCatching { com.xjtu.toolbox.lms.LmsApi(site).getMyCourses() }
+                .rethrowCancellation()
+                .getOrElse {
+                    Log.w(TAG, "lms courses failed", it)
+                    emptyList()
+                }
+        }.also { lmsCoursesCache = Box(it) }
+        if (all.isEmpty()) return null
+
+        val code = course.courseCode.trim()
+        if (code.isNotEmpty()) {
+            all.firstOrNull { it.courseCode.trim().equals(code, ignoreCase = true) }?.let { return it }
+            val stem = code.substringBefore('-').trim()
+            if (stem.length >= 4) {
+                all.firstOrNull {
+                    it.courseCode.trim().substringBefore('-').equals(stem, ignoreCase = true)
+                }?.let { return it }
+            }
+        }
+        val target = course.courseName.normalizedCourseName()
+        if (target.isEmpty()) return null
+        return all.firstOrNull { it.name.normalizedCourseName() == target }
+    }
+
     suspend fun replaySessionsOn(
         manager: SessionManager?,
         course: CourseItem,
