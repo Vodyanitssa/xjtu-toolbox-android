@@ -49,8 +49,13 @@ internal object KqHttp {
         throw lastError ?: RuntimeException("考勤系统请求失败")
     }
 
-    fun buildUrl(path: String, query: Map<String, String> = emptyMap()): String {
-        val base = NewAttendanceLogin.BASE_URL + path
+    /** 当前会话所属考勤站的根地址。本科和研究生是两套域名，不能写死。 */
+    fun baseOf(site: SiteSession): String =
+        (site as? com.xjtu.toolbox.auth.NewAttendanceSession)?.baseUrl()
+            ?: NewAttendanceLogin.BASE_URL
+
+    fun buildUrl(site: SiteSession, path: String, query: Map<String, String> = emptyMap()): String {
+        val base = baseOf(site) + path
         if (query.isEmpty()) return base
         val q = query.entries.joinToString("&") { (k, v) ->
             "${URLEncoder.encode(k, "UTF-8")}=${URLEncoder.encode(v, "UTF-8")}"

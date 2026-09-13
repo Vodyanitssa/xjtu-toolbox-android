@@ -4069,12 +4069,12 @@ private fun applyDetectedAccountType(
     accountManager: com.xjtu.toolbox.account.AccountManager,
     identityTypeName: String?,
 ) {
-    val detected = com.xjtu.toolbox.auth.AccountType.fromIdentityName(identityTypeName) ?: return
-    if (detected == loginState.accountType) return
-    android.util.Log.d(
+    val detected = com.xjtu.toolbox.auth.AccountType.fromIdentityName(identityTypeName)
+    android.util.Log.i(
         "AccountType",
-        "identityTypeName=$identityTypeName → $detected（原 ${loginState.accountType}）",
+        "identityTypeName=<$identityTypeName> detected=$detected current=${loginState.accountType}",
     )
+    if (detected == null || detected == loginState.accountType) return
     loginState.accountType = detected
     loginState.sessionManager?.accountType =
         if (detected == com.xjtu.toolbox.auth.AccountType.POSTGRADUATE) {

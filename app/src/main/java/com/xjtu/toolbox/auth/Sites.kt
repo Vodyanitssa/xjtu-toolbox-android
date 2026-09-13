@@ -172,6 +172,11 @@ class IclassfaceSession : CasSiteSession("iclassface", "快速考勤流水", mus
 // ── NEW ATTENDANCE 新版考勤 kq.xjtu.edu.cn ──────────────────────────────
 
 class NewAttendanceSession : CasSiteSession("new_attendance", "新版考勤", mustUseWebVpn = false) {
+
+    /** 当前账号所属的考勤站点根地址（本科 bk-kq / 研究生 kq），登录成功时写入。 */
+    fun baseUrl(): String =
+        localToken[BASE_URL_KEY] ?: com.xjtu.toolbox.newattendance.NewAttendanceLogin.BASE_URL
+
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         com.xjtu.toolbox.newattendance.NewAttendanceLogin(
             session = client,
@@ -180,8 +185,11 @@ class NewAttendanceSession : CasSiteSession("new_attendance", "新版考勤", mu
         )
 
     override fun onLoginSuccess(login: XJTULogin) {
-        val token = (login as? com.xjtu.toolbox.newattendance.NewAttendanceLogin)?.authToken
+        val kq = login as? com.xjtu.toolbox.newattendance.NewAttendanceLogin
+        val token = kq?.authToken
         if (!token.isNullOrBlank()) localToken["business_token"] = token
+        // 本科与研究生是两套部署（bk-kq / kq），业务请求必须打到签发令牌的那一套。
+        kq?.resolvedBaseUrl?.let { localToken[BASE_URL_KEY] = it }
     }
 
     override fun decorateRequest(builder: Request.Builder): Request.Builder {
@@ -202,7 +210,7 @@ class NewAttendanceSession : CasSiteSession("new_attendance", "新版考勤", mu
         val token = localToken["business_token"] ?: return@withIo false
         val resp = client.newCall(
             Request.Builder()
-                .url("${com.xjtu.toolbox.newattendance.NewAttendanceLogin.BASE_URL}/student/home")
+                .url("${baseUrl()}/student/home")
                 .header(com.xjtu.toolbox.newattendance.NewAttendanceLogin.TOKEN_HEADER, token)
                 .get()
                 .build()
@@ -217,6 +225,9 @@ class NewAttendanceSession : CasSiteSession("new_attendance", "新版考勤", mu
         }
     }
 }
+
+/** [NewAttendanceSession.localToken] 里存考勤站点根地址的键。 */
+const val BASE_URL_KEY = "kq_base_url"
 
 // ── HELLO 迎新/个人信息 ────────────────────────────────────────────────
 

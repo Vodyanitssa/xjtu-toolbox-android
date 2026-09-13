@@ -92,7 +92,7 @@ class LeaveApi(private val site: SiteSession) {
             )
             .build()
         val req = Request.Builder()
-            .url("${NewAttendanceLogin.BASE_URL}/student/leaves/evidence/upload")
+            .url("${KqHttp.baseOf(site)}/student/leaves/evidence/upload")
             .post(body)
             .build()
         val data = KqHttp.obj(KqHttp.execute(site, req, "/student/leaves/evidence/upload", retryable = false).get("data"))
@@ -148,13 +148,13 @@ class LeaveApi(private val site: SiteSession) {
     }
 
     private fun getJson(path: String, query: Map<String, String> = emptyMap()): JsonObject {
-        val req = Request.Builder().url(KqHttp.buildUrl(path, query)).get().build()
+        val req = Request.Builder().url(KqHttp.buildUrl(site, path, query)).get().build()
         return KqHttp.execute(site, req, path, retryable = true)
     }
 
     private fun postJson(path: String, body: JsonObject, retryable: Boolean): JsonObject {
         val req = Request.Builder()
-            .url(KqHttp.buildUrl(path))
+            .url(KqHttp.buildUrl(site, path))
             .post(body.toString().toRequestBody(jsonType))
             .build()
         return KqHttp.execute(site, req, path, retryable)

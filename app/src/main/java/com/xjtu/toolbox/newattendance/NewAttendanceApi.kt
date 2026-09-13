@@ -23,13 +23,13 @@ class NewAttendanceApi(private val site: SiteSession) {
     @Volatile private var cachedTerms: List<TermInfo> = emptyList()
 
     private fun getJson(path: String, query: Map<String, String> = emptyMap()): JsonObject {
-        val req = Request.Builder().url(KqHttp.buildUrl(path, query)).get().build()
+        val req = Request.Builder().url(KqHttp.buildUrl(site, path, query)).get().build()
         return KqHttp.execute(site, req, path, retryable = true)
     }
 
     private fun postJson(path: String, body: JsonObject): JsonObject {
         val req = Request.Builder()
-            .url(KqHttp.buildUrl(path))
+            .url(KqHttp.buildUrl(site, path))
             .post(body.toString().toRequestBody(jsonType))
             .build()
         return KqHttp.execute(site, req, path, retryable = false)
@@ -186,7 +186,7 @@ class NewAttendanceApi(private val site: SiteSession) {
             if (term.isNotBlank()) addProperty("semesterId", term)
         }
         val req = Request.Builder()
-            .url(KqHttp.buildUrl("/student/attendance-records/page"))
+            .url(KqHttp.buildUrl(site, "/student/attendance-records/page"))
             .post(KqHttp.pagePayload(data).toString().toRequestBody(jsonType))
             .build()
         val root = KqHttp.execute(site, req, "/student/attendance-records/page", retryable = true)
