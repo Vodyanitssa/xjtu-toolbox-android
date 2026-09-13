@@ -3,7 +3,6 @@ package com.xjtu.toolbox.hello
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.ImageDecoder
 import android.net.Uri
 import android.util.Log
 import com.xjtu.toolbox.account.AccountContext
@@ -170,8 +169,6 @@ object HelloProfileStore {
 
     // ── 自定义头像 ────────────────────────
 
-    /** 头像最长边上限。界面上最大也就 72dp，512 结结实实够用，再大只是白占内存和磁盘。 */
-    private const val CUSTOM_AVATAR_MAX_PX = 512
 
     /**
      * 用户自选的头像。放 [Context.getFilesDir] 而不是 cacheDir——用户特意设的东西，
@@ -193,39 +190,26 @@ object HelloProfileStore {
         customAvatarFile(context).let { it.exists() && it.length() > 0 }
 
     /**
-     * 保存用户选的图片为头像。
+     * 保存已经裁好的头像位图。
      *
-     * 用 [ImageDecoder] 而不是 [BitmapFactory]：前者会自动应用 EXIF 旋转，
-     * 否则相机直出的照片会歪着显示。解码时就降采样，不把原图全尺寸读进内存。
+     * 裁剪由 [com.xjtu.toolbox.ui.components.AvatarCropDialog] 做完，这里只负责落盘，
+     * 不再解码也不再缩放：裁剪器已经把 EXIF 方向、降采样和尺寸都处理好了。
      *
-     * @return 成功与否；失败已记日志，调用方只需提示用户。
+     * 同样是先写临时文件再改名，避免写到一半被读到半张图。
      */
-    suspend fun saveCustomAvatar(context: Context, uri: Uri): Boolean =
+    suspend fun saveCustomAvatarBitmap(context: Context, bitmap: Bitmap): Boolean =
         withContext(Dispatchers.IO) {
             runCatching {
-                val source = ImageDecoder.createSource(context.contentResolver, uri)
-                val bitmap = ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
-                    // 硬件 Bitmap 不能 compress，必须要软件分配
-                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-                    val longest = maxOf(info.size.width, info.size.height)
-                    if (longest > CUSTOM_AVATAR_MAX_PX) {
-                        decoder.setTargetSampleSize(
-                            Integer.highestOneBit(longest / CUSTOM_AVATAR_MAX_PX).coerceAtLeast(1)
-                        )
-                    }
-                }
                 val target = customAvatarFile(context)
-                // 先写临时文件再改名，与证件照一致，避免写到一半被读
                 val tmp = File(target.absolutePath + ".tmp")
                 tmp.outputStream().use { out ->
-                    check(bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out)) { "compress failed" }
+                    check(bitmap.compress(Bitmap.CompressFormat.JPEG, 92, out)) { "compress failed" }
                 }
-                bitmap.recycle()
                 if (target.exists()) target.delete()
                 check(tmp.renameTo(target)) { "rename failed" }
                 true
             }.getOrElse {
-                Log.w(TAG, "save custom avatar failed: ${it.message}")
+                Log.w(TAG, "save cropped avatar failed: ${it.message}")
                 runCatching { File(customAvatarFile(context).absolutePath + ".tmp").delete() }
                 false
             }

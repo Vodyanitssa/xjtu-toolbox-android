@@ -4581,20 +4581,14 @@ private fun ProfileTab(
         mutableStateOf(com.xjtu.toolbox.hello.HelloProfileStore.hasCustomAvatar(ctx))
     }
     var avatarSaving by remember { mutableStateOf(false) }
+    // 选中的图先交给裁剪器，确认后才落盘。直接存原图的话，非正方形的照片
+    // 会被显示侧的圆形裁切成随机的一块（多数人截图都是竖的，脸正好在圈外）。
+    var avatarCropUri by remember { mutableStateOf<android.net.Uri?>(null) }
     val avatarPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        avatarSaving = true
-        scope.launch {
-            val ok = com.xjtu.toolbox.hello.HelloProfileStore.saveCustomAvatar(ctx, uri)
-            if (ok) {
-                helloAvatar = com.xjtu.toolbox.hello.HelloProfileStore.cachedAvatar(ctx)
-                hasCustomAvatar = true
-            }
-            avatarSaving = false
-            showAvatarSheet = false
-        }
+        avatarCropUri = uri
     }
 
     LaunchedEffect(loginState.isLoggedIn, loginState.activeUsername) {
@@ -4678,6 +4672,28 @@ private fun ProfileTab(
                 } catch (_: Exception) { }
             }
         }
+    }
+
+    // ── 头像裁剪 ──
+    avatarCropUri?.let { cropUri ->
+        com.xjtu.toolbox.ui.components.AvatarCropDialog(
+            uri = cropUri,
+            onCancel = { avatarCropUri = null },
+            onConfirm = { bitmap ->
+                avatarCropUri = null
+                avatarSaving = true
+                scope.launch {
+                    val ok = com.xjtu.toolbox.hello.HelloProfileStore
+                        .saveCustomAvatarBitmap(ctx, bitmap)
+                    if (ok) {
+                        helloAvatar = com.xjtu.toolbox.hello.HelloProfileStore.cachedAvatar(ctx)
+                        hasCustomAvatar = true
+                    }
+                    avatarSaving = false
+                    showAvatarSheet = false
+                }
+            },
+        )
     }
 
     // ── 换头像弹窗 ──
