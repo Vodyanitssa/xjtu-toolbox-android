@@ -257,6 +257,13 @@ fun LibraryScreen(site: SiteSession, onBack: () -> Unit) {
         if (selectedAreaCode.isNotEmpty()) loadSeatsFor(selectedAreaCode)
     }
 
+    // 后台把本校区所有楼层的区域名学一遍。用来判断「已有预约是不是在别的校区」——
+    // 只学用户翻过的那几层的话，没翻过的楼层会被误判成外校区。
+    // 顺带让切楼层时区域标签立刻就有。
+    LaunchedEffect(campus) {
+        withContext(Dispatchers.IO) { runCatching { api.warmCampusAreas(campus) } }
+    }
+
     // 首次 bootstrap：认账号当前校区 → 拉第一层的区域 → 拉预约信息
     LaunchedEffect(Unit) {
         // 以账号在图书馆系统里实际选的校区为准。本地记的那个可能是上次装机时的，
@@ -355,21 +362,6 @@ fun LibraryScreen(site: SiteSession, onBack: () -> Unit) {
         }
     }
 
-    // 预约前检查：如有现有预约则弹窗确认换座
-    fun bookSeat(seatId: String) {
-        val existing = myBooking?.seatId
-        val isExpired = myBooking?.statusText?.let { "超时" in it || "过期" in it || "失效" in it } == true
-        if (existing != null && !isExpired) {
-            val area = myBooking?.area?.let { " ($it)" } ?: ""
-            confirmDialog = "你已预约座位 $existing$area\n是否换座到 $seatId？" to {
-                // 直接调用 /updateseat/ 端点，不走 /seat/ 的检测逻辑
-                doSwapSeat(seatId)
-            }
-        } else {
-            doBookSeat(seatId)
-        }
-    }
-
     // 执行操作
     fun executeBookingAction(label: String, url: String) {
         isBooking = true
@@ -381,6 +373,35 @@ fun LibraryScreen(site: SiteSession, onBack: () -> Unit) {
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { bookingResult = BookResult(false, "$label 失败: ${e.message}") }
             isBooking = false
+        }
+    }
+
+    // 预约前检查：如有现有预约则弹窗确认换座
+    fun bookSeat(seatId: String) {
+        val existing = myBooking?.seatId
+        val isExpired = myBooking?.statusText?.let { "超时" in it || "过期" in it || "失效" in it } == true
+        if (existing != null && !isExpired) {
+            val bookedArea = myBooking?.area
+            val area = bookedArea?.let { " ($it)" } ?: ""
+            // 跨校区换座服务端不会照办，只会把请求晾到超时——用户看到的是转很久然后失败。
+            // 预约绑在账号的 rplace 上，所以只能先取消再到本校区约。
+            if (api.isForeignArea(bookedArea)) {
+                confirmDialog = (
+                    "你在「$bookedArea」有预约（$existing），不在${campus.displayName}。\n" +
+                        "跨校区不能直接换座，需要先取消原预约。\n是否现在取消？"
+                ) to {
+                    val cancelUrl = myBooking?.actionUrls?.get("取消预约")
+                    if (cancelUrl != null) executeBookingAction("取消预约", cancelUrl)
+                    else bookingResult = BookResult(false, "没找到取消入口，请到「我的预约」里手动取消")
+                }
+                return
+            }
+            confirmDialog = "你已预约座位 $existing$area\n是否换座到 $seatId？" to {
+                // 直接调用 /updateseat/ 端点，不走 /seat/ 的检测逻辑
+                doSwapSeat(seatId)
+            }
+        } else {
+            doBookSeat(seatId)
         }
     }
 
