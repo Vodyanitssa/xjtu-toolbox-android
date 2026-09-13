@@ -142,11 +142,7 @@ class NewAttendanceLogin(
     private fun rememberBase(url: HttpUrl) {
         val host = url.host.lowercase()
         if (host.endsWith(".xjtu.edu.cn") && "kq" in host.substringBefore('.')) {
-            val next = "https://$host/sa"
-            if (next != resolvedBaseUrl) {
-                Log.i(TAG, "考勤站点 = $next")
-                resolvedBaseUrl = next
-            }
+            resolvedBaseUrl = "https://$host/sa"
         }
     }
 
