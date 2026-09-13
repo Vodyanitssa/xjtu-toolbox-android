@@ -2466,18 +2466,16 @@ private fun MainScreen(
             }
         },
         topBar = {
-            // 屁岱和学辅这两页永远用折叠态标题。
-            // 大标题适合"一屏内容从头往下读"的页面；这两页一个是从下往上长的聊天、
-            // 一个标题本身就长（仲英学辅资料站），大标题只会挤占内容并随滚动忽大忽小。
-            // miuix 的 SmallTopAppBar 就是钉死在折叠态的版本。
-            if (selectedTab == BottomTab.PIDAI || selectedTab == BottomTab.TOOLS) {
-                val pidai = selectedTab == BottomTab.PIDAI
+            // 屁岱永远用折叠态标题：它是从下往上长的聊天，大标题会随滚动忽大忽小。
+            // 学辅原来也在这一档，理由是"它是个 WebView，没有可驱动折叠的原生滚动"；
+            // 现在那一页换成了原生列表，正是大标题适用的场景，于是移回下面那一档。
+            if (selectedTab == BottomTab.PIDAI) {
                 top.yukonga.miuix.kmp.basic.SmallTopAppBar(
-                    title = if (pidai) agentTitle else "仲英学辅资料站",
+                    title = agentTitle,
                     color = MiuixTheme.colorScheme.surface,
-                    scrollBehavior = if (pidai) agentScrollBehavior else toolsScrollBehavior,
-                    navigationIcon = { if (pidai) agentHeaderNavIcon?.invoke() },
-                    actions = { if (pidai) agentHeaderActions?.invoke(this) },
+                    scrollBehavior = agentScrollBehavior,
+                    navigationIcon = { agentHeaderNavIcon?.invoke() },
+                    actions = { agentHeaderActions?.invoke(this) },
                 )
             } else {
             TopAppBar(
@@ -4090,9 +4088,14 @@ private fun applyDetectedAccountType(
 //  Tab 3 — 仲英学辅资料站（zyxf.top）
 // ══════════════════════════════════════════
 
-private const val ZYXF_URL = "https://zyxf.top"
-
-@SuppressLint("SetJavaScriptEnabled")
+/**
+ * Tab 3 —— 仲英学辅资料站。
+ *
+ * 从"把 zyxf.top 整站塞进 WebView"改成原生：列表、检索、下载走它的公开只读接口，
+ * 排版用 MIUIX，和应用其它页面一致（见 [com.xjtu.toolbox.zyxf.ZyxfBrowseScreen]）。
+ * 预览那一层仍然是 WebView，但只装一个壳页借阿里云 IMM 的渲染，
+ * 不再把它整套 SPA 拖进来。
+ */
 @Composable
 private fun ToolsTab(
     loginState: AppLoginState,
@@ -4101,306 +4104,12 @@ private fun ToolsTab(
     scrollBehavior: ScrollBehavior? = null,
     navBarStyle: String = "floating"
 ) {
-    var webViewRef by remember { mutableStateOf<android.webkit.WebView?>(null) }
-    var canGoBack by remember { mutableStateOf(false) }
-    var progress by remember { mutableIntStateOf(0) }
-    var isPageLoading by remember { mutableStateOf(true) }
-    var loadError by remember { mutableStateOf<String?>(null) }
-    val ctx = LocalContext.current
-    val dlScope = rememberCoroutineScope()
-    val isDark = LocalIsDarkTheme.current
-    val darkState = rememberUpdatedState(isDark)
-
-    LaunchedEffect(isDark, webViewRef) {
-        webViewRef?.let { WebViewNightMode.apply(it, isDark) }
-    }
-
-    // blob: 下载桥。
-    //
-    // 资料站用 JS 把文件读进内存后 URL.createObjectURL() 生成 blob: 地址触发下载。
-    // blob: 仅在该页面的 JS 上下文有效，App 侧 HTTP 客户端无法访问
-    // （OkHttp 会抛 "expected url scheme http or https but was blob"）。
-    // 只能由页面内的 JS 读成 base64 回传，App 侧解码落盘。
-    val blobBridge = remember(ctx) {
-        object {
-            @android.webkit.JavascriptInterface
-            fun onBlob(base64: String, fileName: String) {
-                dlScope.launch {
-                    val saved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        runCatching {
-                            // base64 形如 data:application/pdf;base64,xxxx —— MIME 也能顺便取到
-                            val mime = base64.substringAfter("data:", "")
-                                .substringBefore(";", "")
-                            val bytes = android.util.Base64.decode(
-                                base64.substringAfter(","),
-                                android.util.Base64.DEFAULT
-                            )
-                            val uri = com.xjtu.toolbox.lms.LmsDownloadStore.saveBytes(
-                                context = ctx,
-                                fileName = fileName.ifBlank { "download_${System.currentTimeMillis()}" },
-                                mimeType = mime,
-                                bytes = bytes,
-                                category = com.xjtu.toolbox.lms.LmsDownloadStore.CATEGORY_ZYXF,
-                            )
-                            uri to bytes.size
-                        }.getOrElse { e ->
-                            android.util.Log.e("ToolsTab", "blob save failed", e)
-                            null to 0
-                        }
-                    }
-                    val (uri, size) = saved
-                    android.widget.Toast.makeText(
-                        ctx,
-                        if (uri != null) "已保存 $fileName（${size / 1024} KB）" else "保存失败",
-                        android.widget.Toast.LENGTH_SHORT
-                    ).show()
-                }
-            }
-        }
-    }
-
-    // 站内有历史时，系统返回键先回退网页，避免直接退出 App
-    BackHandler(enabled = canGoBack) { webViewRef?.goBack() }
-
-    Box(
-        Modifier
-            .fillMaxSize()
-            .padding(bottom = if (navBarStyle == "floating") 88.dp else 0.dp)
-    ) {
-        androidx.compose.ui.viewinterop.AndroidView(
-            factory = { ctx ->
-                android.webkit.WebView(ctx).apply {
-                    layoutParams = android.view.ViewGroup.LayoutParams(
-                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
-                    )
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.loadWithOverviewMode = true
-                    settings.useWideViewPort = true
-                    webViewClient = object : android.webkit.WebViewClient() {
-                        // 诊断 + 兜底：把每次导航请求打出来。
-                        // 如果点下载后这里出现了一个像文件的 URL 而 DownloadListener 没触发，
-                        // 说明服务端没给 Content-Disposition，WebView 把它当页面导航了 ——
-                        // 这种情况按扩展名判断并自己接管下载。
-                        override fun shouldOverrideUrlLoading(
-                            view: android.webkit.WebView?,
-                            request: android.webkit.WebResourceRequest?
-                        ): Boolean {
-                            val u = request?.url?.toString() ?: return false
-                            android.util.Log.d("ToolsTab", "navigate: $u")
-                            // 不按扩展名判断是否为下载：资料站格式无法穷举
-                            // （.md/.tex/.caj/.tar.gz，甚至没有扩展名），且是否为附件取决于
-                            // 服务器响应头而非 URL 形状。
-                            // 交给 WebView 请求即可，附件类响应会走下面的 DownloadListener。
-                            return false
-                        }
-
-                        override fun onPageStarted(view: android.webkit.WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                            isPageLoading = true
-                            loadError = null
-                        }
-                        override fun onPageFinished(view: android.webkit.WebView?, url: String?) {
-                            isPageLoading = false
-                            canGoBack = view?.canGoBack() == true
-
-                            // 挂钩 a.click()：JS 造 <a href=blob:> 再 click() 这条路径
-                            // 不一定触发 DownloadListener（取决于 WebView 版本与 download 属性），
-                            // 不拦就点了没反应。是 blob 链接就读成 base64 交给桥。
-                            view?.evaluateJavascript(
-                                """
-                                (function() {
-                                  if (window.__xjtuBlobHooked) return;
-                                  window.__xjtuBlobHooked = true;
-                                  var origClick = HTMLAnchorElement.prototype.click;
-                                  HTMLAnchorElement.prototype.click = function() {
-                                    try {
-                                      var h = this.href || '';
-                                      if (h.indexOf('blob:') === 0) {
-                                        var nm = this.getAttribute('download') || 'download';
-                                        var xhr = new XMLHttpRequest();
-                                        xhr.open('GET', h, true);
-                                        xhr.responseType = 'blob';
-                                        xhr.onload = function() {
-                                          var r = new FileReader();
-                                          r.onloadend = function() { XJTUBlobBridge.onBlob(r.result, nm); };
-                                          r.readAsDataURL(xhr.response);
-                                        };
-                                        xhr.send();
-                                        return;
-                                      }
-                                    } catch (e) {}
-                                    return origClick.apply(this, arguments);
-                                  };
-                                })();
-                                """.trimIndent(),
-                                null
-                            )
-                            view?.let { WebViewNightMode.apply(it, darkState.value) }
-                        }
-                        override fun onReceivedError(
-                            view: android.webkit.WebView?,
-                            request: android.webkit.WebResourceRequest?,
-                            error: android.webkit.WebResourceError?
-                        ) {
-                            // 只把主文档失败视为页面错误，子资源失败忽略
-                            if (request?.isForMainFrame == true) {
-                                isPageLoading = false
-                                loadError = "无法连接 zyxf.top，请检查网络后重试"
-                            }
-                        }
-                    }
-                    // 允许 JS 开新窗口，否则 target="_blank" 的下载链接会被直接吞掉
-                    settings.setSupportMultipleWindows(true)
-                    settings.javaScriptCanOpenWindowsAutomatically = true
-                    webChromeClient = object : android.webkit.WebChromeClient() {
-                        override fun onProgressChanged(view: android.webkit.WebView?, newProgress: Int) {
-                            progress = newProgress
-                        }
-
-                        // 资料站的下载链接不少是 target="_blank"。开了 setSupportMultipleWindows 后
-                        // 这类点击会走到这里，如果不处理就**什么都不会发生**（比不开还糟）。
-                        // 这里不真开新窗口，而是把目标 URL 交回当前 WebView：
-                        // 是文件就触发 DownloadListener，是页面就正常导航。
-                        override fun onCreateWindow(
-                            view: android.webkit.WebView?,
-                            isDialog: Boolean,
-                            isUserGesture: Boolean,
-                            resultMsg: android.os.Message?
-                        ): Boolean {
-                            val transport = resultMsg?.obj as? android.webkit.WebView.WebViewTransport
-                                ?: return false
-                            val tmp = android.webkit.WebView(view!!.context)
-                            tmp.webViewClient = object : android.webkit.WebViewClient() {
-                                override fun shouldOverrideUrlLoading(
-                                    v: android.webkit.WebView?,
-                                    req: android.webkit.WebResourceRequest?
-                                ): Boolean {
-                                    req?.url?.toString()?.let { view.loadUrl(it) }
-                                    tmp.destroy()
-                                    return true
-                                }
-                            }
-                            transport.webView = tmp
-                            resultMsg.sendToTarget()
-                            return true
-                        }
-                    }
-                    // 资料站下载落到公共下载目录并登记进 LmsDownloadStore，与成绩单、
-                    // 思源课件同处，在下载管理页作为独立分区显示。
-                    // 不走 classreplay 的 DownloadManager：那套面向回放视频（断点续传、
-                    // 并发限流、按 camera/audio 分轨），文件类下载塞进去会让分类失真。
-                    addJavascriptInterface(blobBridge, "XJTUBlobBridge")
-                    setDownloadListener { url, userAgent, contentDisposition, mimeType, _ ->
-                        android.util.Log.d(
-                            "ToolsTab",
-                            "onDownloadStart: url=$url mime=$mimeType disposition=$contentDisposition"
-                        )
-                        val name = runCatching {
-                            android.webkit.URLUtil.guessFileName(url, contentDisposition, mimeType)
-                        }.getOrNull().orEmpty()
-
-                        // blob: 走 JS 桥读内容，不能交给 OkHttp（scheme 不支持，会抛
-                        // "expected url scheme http or https but was blob"）
-                        if (url.startsWith("blob:")) {
-                            val js = """
-                                (function() {
-                                  var xhr = new XMLHttpRequest();
-                                  xhr.open('GET', '$url', true);
-                                  xhr.responseType = 'blob';
-                                  xhr.onload = function() {
-                                    var r = new FileReader();
-                                    r.onloadend = function() {
-                                      XJTUBlobBridge.onBlob(r.result, ${'"'}${name.ifBlank { "download" }}${'"'});
-                                    };
-                                    r.readAsDataURL(xhr.response);
-                                  };
-                                  xhr.onerror = function() { XJTUBlobBridge.onBlob('', ''); };
-                                  xhr.send();
-                                })();
-                            """.trimIndent()
-                            webViewRef?.evaluateJavascript(js, null)
-                            return@setDownloadListener
-                        }
-                        // 普通 http(s) 下载：落到公共 Downloads/XJTUToolBox（与成绩单、思源课件同处），
-                        // 走 MediaStore 不需要存储权限，系统文件管理器可见、卸载不丢。
-                        val cookie = runCatching {
-                            android.webkit.CookieManager.getInstance().getCookie(url)
-                        }.getOrNull()
-                        dlScope.launch {
-                            android.widget.Toast.makeText(
-                                ctx, "开始下载 ${name.ifBlank { "文件" }}", android.widget.Toast.LENGTH_SHORT
-                            ).show()
-                            val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                                com.xjtu.toolbox.zyxf.ZyxfDownloader.download(
-                                    context = ctx,
-                                    url = url,
-                                    fallbackName = name,
-                                    userAgent = userAgent,
-                                    cookie = cookie,
-                                )
-                            }
-                            android.widget.Toast.makeText(
-                                ctx,
-                                if (ok != null) "已保存 $ok" else "下载失败，可长按链接用浏览器打开",
-                                android.widget.Toast.LENGTH_SHORT
-                            ).show()
-                        }
-                    }
-                    loadUrl(ZYXF_URL)
-                    webViewRef = this
-                }
-            },
-            modifier = Modifier.fillMaxSize()
-        )
-
-        // 顶部加载进度线
-        if (isPageLoading && loadError == null) {
-            LinearProgressIndicator(
-                progress = (progress / 100f).coerceIn(0.05f, 1f),
-                modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
-                height = 2.dp
-            )
-        }
-
-        // 主文档加载失败的兜底页
-        loadError?.let { msg ->
-            Column(
-                Modifier
-                    .fillMaxSize()
-                    .background(MiuixTheme.colorScheme.background)
-                    .padding(horizontal = 24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Icon(
-                    Icons.Default.CloudOff,
-                    contentDescription = null,
-                    tint = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                    modifier = Modifier.size(56.dp)
-                )
-                Spacer(Modifier.height(16.dp))
-                Text(
-                    "仲英学辅资料站",
-                    style = MiuixTheme.textStyles.title3,
-                    fontWeight = FontWeight.Bold
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    msg,
-                    style = MiuixTheme.textStyles.body2,
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                )
-                Spacer(Modifier.height(20.dp))
-                Button(onClick = {
-                    loadError = null
-                    isPageLoading = true
-                    webViewRef?.loadUrl(ZYXF_URL)
-                }) { Text("重新加载") }
-            }
-        }
-    }
+    com.xjtu.toolbox.zyxf.ZyxfBrowseScreen(
+        contentPadding = PaddingValues(
+            bottom = if (navBarStyle == "floating") 96.dp else 0.dp,
+        ),
+        scrollBehavior = scrollBehavior,
+    )
 }
 
 // ══════════════════════════════════════════

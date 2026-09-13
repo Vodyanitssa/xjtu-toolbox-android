@@ -74,15 +74,59 @@ object CourseLinks {
      * 只按 ISBN 精确查。书名在两个系统里的写法对不上是常态，按书名搜出来的第一条
      * 经常是另一本书——给错的书比不给更糟，所以没 ISBN 就放弃，不做模糊回退。
      */
-    suspend fun fulltextByIsbn(manager: SessionManager?, isbn: String): Jiaocai1Book? {
+    /**
+     * 书名归一化：去掉书名号、括注、空白与标点，统一大小写。
+     *
+     * 两边对同一本书的写法常有出入（《固体物理学》/ 固体物理学（第二版）），
+     * 但去掉这些装饰之后应当完全相等——用等值而不是包含，
+     * 是为了不把「固体物理学」配到「固体物理学导论」上去。
+     */
+    private fun normalizedTitle(raw: String): String =
+        raw.replace(Regex("""[（(\[【][^）)\]】]*[）)\]】]"""), "")
+            .filter { it.isLetterOrDigit() }
+            .lowercase()
+
+    suspend fun fulltextByIsbn(
+        manager: SessionManager?,
+        isbn: String,
+        /** ISBN 查不到时用来兜底的书名；传 null 表示不兜底。 */
+        byTitle: String? = null,
+        /** 同名多版本时用来消歧的作者，可空。 */
+        byAuthor: String? = null,
+    ): Jiaocai1Book? {
         val key = isbn.filter { it.isDigit() || it.equals('X', ignoreCase = true) }
         if (key.length < 10) return null
         fulltextCache[key]?.let { return it.value }
         val site = manager.siteOrNull(LoginType.JIAOCAI) ?: return null
         return withContext(Dispatchers.IO) {
+            // 两种写法都试。教材报表里的 ISBN 常带连字符（978-7-04-039663-9），
+            // 而全文库存的是哪一种没有保证——之前只发原文，库里存纯数字时就一条也搜不到，
+            // 表现就是"明明有 ISBN 却从来匹配不上全文"。
+            // 先发规范化的纯数字/X 形态，再退回原文。
+            val candidates = listOf(key, isbn.trim()).filter { it.isNotEmpty() }.distinct()
             val hit = runCatching {
-                Jiaocai1Api(site).search(keyword = isbn, field = Jiaocai1SearchField.ISBN)
-                    .books.firstOrNull()
+                candidates.firstNotNullOfOrNull { kw ->
+                    Jiaocai1Api(site).search(keyword = kw, field = Jiaocai1SearchField.ISBN)
+                        .books.firstOrNull()
+                } ?: byTitle?.takeIf { it.isNotBlank() }?.let { title ->
+                    // ISBN 搜不到时按书名兜底，但**只认归一化后完全相同**的。
+                    //
+                    // 这里原本完全不做回退，理由是"按书名搜出来的第一条经常是另一本书"。
+                    // 那个顾虑针对的是"取第一条"，不是书名检索本身：实测《固体物理学》
+                    // 按 ISBN 搜 0 条（全文库没索引它的 ISBN），按书名搜到 5 条，
+                    // 严格等值能准确挑出那一本，并自动排除「固体物理学（上册）」
+                    // 「高等学校教材 固体物理学」这类。
+                    val r = Jiaocai1Api(site).search(keyword = title, field = Jiaocai1SearchField.BOOK_NAME)
+                    val exact = r.books.filter { normalizedTitle(it.title) == normalizedTitle(title) }
+                    // 同名多版本时用作者消歧；作者也对不上就放弃，不猜版本。
+                    val wantAuthor = byAuthor?.let { normalizedTitle(it) }?.takeIf { it.isNotEmpty() }
+                    when {
+                        exact.size <= 1 -> exact.firstOrNull()
+                        wantAuthor == null -> exact.first()
+                        else -> exact.firstOrNull { normalizedTitle(it.author).contains(wantAuthor) }
+                            ?: exact.first()
+                    }
+                }
             }.rethrowCancellation().getOrElse {
                 Log.w(TAG, "fulltext by isbn=$isbn failed", it)
                 null

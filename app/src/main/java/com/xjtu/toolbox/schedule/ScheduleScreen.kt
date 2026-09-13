@@ -261,6 +261,16 @@ fun ScheduleScreen(
     var termList by remember { mutableStateOf(disk.termList) }
     var selectedTermCode by remember { mutableStateOf(disk.termCode) }
     var currentTermCode by remember { mutableStateOf(disk.termCode) }  // 当前学期，用于判断是否缓存考试
+
+    /**
+     * 本次会话里用户有没有主动切过学期。
+     *
+     * 切过就不该再被"当前学期"拽回去。用 rememberSaveable 是为了跨越
+     * 导航到子页面再返回（那会让本 composable 被销毁重建）；
+     * 进程重启后回到 false，于是新会话仍然从当前学期开始——
+     * 不然开学后会永远停在上学期。
+     */
+    var userPickedTerm by rememberSaveable { mutableStateOf(false) }
     var termDropdownExpanded by remember { mutableStateOf(false) }
 
     // 周视图 vs 总览（每次启动默认周视图，不保存状态）
@@ -453,10 +463,18 @@ fun ScheduleScreen(
                             }
 
                             val termCode = termDeferred.await()
-                            selectedTermCode = termCode
                             currentTermCode = termCode
-                            try { dataCache.put("schedule_last_term", gson.toJson(termCode)) } catch (_: Exception) {}
-                            if (termCode != lastTerm && lastTerm.isNotEmpty()) {
+                            // 用户本次进来主动切过学期时，不要再把视图拽回"当前学期"。
+                            // 这段以前是无条件执行的：从课程详情跳去思源学堂再返回，
+                            // ScheduleScreen 重新组合 → loadInitialData 重跑 →
+                            // selectedTermCode 被覆盖成当前学期，连 schedule_last_term
+                            // 也被一起改写，用户刚翻到的历史学期就这么没了。
+                            val keepUserTerm = userPickedTerm && lastTerm.isNotEmpty() && lastTerm != termCode
+                            if (!keepUserTerm) {
+                                selectedTermCode = termCode
+                                try { dataCache.put("schedule_last_term", gson.toJson(termCode)) } catch (_: Exception) {}
+                            }
+                            if (!keepUserTerm && termCode != lastTerm && lastTerm.isNotEmpty()) {
                                 if (paintCache(termCode) > 0) {
                                     isLoading = false
                                     isRefreshingFromNetwork = true
@@ -478,14 +496,18 @@ fun ScheduleScreen(
                                     try { dataCache.put("exams_$termCode", gson.toJson(freshExams)) } catch (_: Exception) {}
                                 }
                             } else {
-                                val freshCourses = prefetched ?: api.getSchedule(termCode)
+                                // 留在用户选的学期时，这一支要认那一个学期——
+                                // examsDeferred / startDateDeferred / prefetched 本来就是按
+                                // lastTerm 发的，只有这里的标签之前写成了 termCode。
+                                val viewTerm = if (keepUserTerm) lastTerm else termCode
+                                val freshCourses = prefetched ?: api.getSchedule(viewTerm)
                                 if (prefetched == null) {
-                                    paintCourses(termCode, freshCourses, startOfTerm)
+                                    paintCourses(viewTerm, freshCourses, startOfTerm)
                                 }
                                 val startDate = startDateDeferred.await() ?: startOfTerm
                                 if (startDate != null) {
                                     applyTermStart(startDate)
-                                    try { dataCache.put("start_date_$termCode", gson.toJson(startDate.toString())) } catch (_: Exception) {}
+                                    try { dataCache.put("start_date_$viewTerm", gson.toJson(startDate.toString())) } catch (_: Exception) {}
                                     if (holidayDates.isNotEmpty()) {
                                         courses = ScheduleCache.filterByHolidays(freshCourses, startDate, holidayDates)
                                     }
@@ -493,7 +515,7 @@ fun ScheduleScreen(
                                 val freshExams = examsDeferred.await()
                                 exams = freshExams
                                 if (freshExams.isNotEmpty()) {
-                                    try { dataCache.put("exams_$termCode", gson.toJson(freshExams)) } catch (_: Exception) {}
+                                    try { dataCache.put("exams_$viewTerm", gson.toJson(freshExams)) } catch (_: Exception) {}
                                 }
                             }
                             val availableTerms = (termListDeferred.await() + readCachedTerms()).distinct()
@@ -815,6 +837,7 @@ fun ScheduleScreen(
     // 切换学期
     fun switchTerm(newTermCode: String) {
         if (newTermCode == selectedTermCode) return
+        userPickedTerm = true
         selectedTermCode = newTermCode
         try { dataCache.put("schedule_last_term", gson.toJson(newTermCode)) } catch (_: Exception) {}
         textbooksLoaded = false

@@ -121,11 +121,22 @@ fun LmsScreen(
 
     // 只跳一次：跳完把意图消费掉，否则用户从活动页返回课程列表会被立刻弹回去。
     var pendingCourseId by remember { mutableStateOf(initialCourseId) }
+    LaunchedEffect(pendingCourseId) {
+        // 占位期间 CourseListPage 没被组合，它那个"进页面就加载"的 effect 不会跑，
+        // 得在这里把列表拉起来，否则一直转圈。
+        if (pendingCourseId != null && cache.courses.isEmpty()) {
+            runCatching {
+                cache.courses = withContext(Dispatchers.IO) { api.getMyCourses() }
+            }
+        }
+    }
     LaunchedEffect(cache.courses, pendingCourseId) {
         val want = pendingCourseId ?: return@LaunchedEffect
-        val hit = cache.courses.firstOrNull { it.id == want } ?: return@LaunchedEffect
+        if (cache.courses.isEmpty()) return@LaunchedEffect
+        val hit = cache.courses.firstOrNull { it.id == want }
+        // 匹配不到就老实落回课程列表，别把用户困在转圈里。
         pendingCourseId = null
-        currentPage = LmsPage.ActivityList(hit)
+        if (hit != null) currentPage = LmsPage.ActivityList(hit)
     }
 
     // 首次使用提示
@@ -167,8 +178,18 @@ fun LmsScreen(
     }
 
     // 返回处理
+    // 从日程页深链进来看某门课时，返回应当直接回日程，而不是先落到课程列表——
+    // 用户并没有"进过"那个列表，退到那儿等于凭空多一层。
+    // 合并成一个 BackHandler：多个同时启用时后注册的先被调用，
+    // 拆成两个很容易被顺序坑到。
+    val deepLinked = initialCourseId != null
     BackHandler(enabled = currentPage !is LmsPage.CourseList) {
-        currentPage = when (val cur = currentPage) {
+        val cur = currentPage
+        if (deepLinked && cur is LmsPage.ActivityList) {
+            onBack()
+            return@BackHandler
+        }
+        currentPage = when (cur) {
             is LmsPage.VideoPlayer -> cur.returnPage
             is LmsPage.ActivityDetail -> LmsPage.ActivityList(cur.course)
             is LmsPage.ActivityList -> LmsPage.CourseList
@@ -211,17 +232,27 @@ fun LmsScreen(
         label = "LmsPage"
     ) { page ->
         when (page) {
-            is LmsPage.CourseList -> CourseListPage(
-                api = api,
-                cache = cache,
-                onBack = onBack,
-                onCourseSelected = { currentPage = LmsPage.ActivityList(it) }
-            )
+            // 带着 courseId 进来时先显示占位：课程列表要等接口回来才能匹配到那门课，
+            // 这中间把列表画出来，用户看到的就是"闪一下列表又跳走"。
+            is LmsPage.CourseList -> if (pendingCourseId != null) {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            } else {
+                CourseListPage(
+                    api = api,
+                    cache = cache,
+                    onBack = onBack,
+                    onCourseSelected = { currentPage = LmsPage.ActivityList(it) }
+                )
+            }
             is LmsPage.ActivityList -> ActivityListPage(
                 api = api,
                 cache = cache,
                 course = page.course,
-                onBack = { currentPage = LmsPage.CourseList },
+                // 标题栏的返回箭头要和系统返回键一致：深链进来的直接退出，
+                // 否则点箭头仍会掉进那个用户没进过的课程列表。
+                onBack = { if (deepLinked) onBack() else currentPage = LmsPage.CourseList },
                 onActivitySelected = { currentPage = LmsPage.ActivityDetail(page.course, it) }
             )
             is LmsPage.ActivityDetail -> ActivityDetailPage(
