@@ -40,11 +40,10 @@ import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.google.zxing.BarcodeFormat
-import com.google.zxing.EncodeHintType
 import com.google.zxing.common.BitMatrix
 import com.google.zxing.oned.Code128Writer
-import com.google.zxing.qrcode.QRCodeWriter
 import com.xjtu.toolbox.auth.SiteSession
+import com.xjtu.toolbox.util.QrBitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -72,11 +71,8 @@ private fun BitMatrix.toBitmap(foreground: Int, background: Int): Bitmap {
     }
 }
 
-private fun generateQrCode(text: String, size: Int = 600): Bitmap {
-    val hints = mapOf(EncodeHintType.MARGIN to 1)
-    return QRCodeWriter().encode(text, BarcodeFormat.QR_CODE, size, size, hints)
-        .toBitmap(android.graphics.Color.BLACK, android.graphics.Color.WHITE)
-}
+/** 付款码很短，装不下的情况只可能是接口返回了异常内容，交给 [QrBitmap] 返回 null 即可。 */
+private fun generateQrCode(text: String, size: Int = 600): Bitmap? = QrBitmap.generate(text, size)
 
 private fun generateBarcode(text: String, width: Int = 800, height: Int = 200): Bitmap {
     return Code128Writer().encode(text, BarcodeFormat.CODE_128, width, height)
