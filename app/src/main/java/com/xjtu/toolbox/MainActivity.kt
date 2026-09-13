@@ -246,6 +246,7 @@ object Routes {
     const val EMPTY_ROOM = "empty_room"
     const val NOTIFICATION = "notification"
     const val ATTENDANCE = "attendance"
+    const val NEW_ATTENDANCE = "new_attendance"
     const val POSTGRADUATE_ATTENDANCE = "postgraduate_attendance"
     const val SCHEDULE = "schedule"
     const val JUDGE = "judge"
@@ -298,6 +299,7 @@ object Routes {
 /** shortcut / 搜索 / 深链进功能页时，对应要先登录的站点。null = 无需登录可直达。 */
 fun loginTypeForRoute(route: String): LoginType? = when (route) {
     Routes.ATTENDANCE -> LoginType.ATTENDANCE
+    Routes.NEW_ATTENDANCE -> LoginType.NEW_ATTENDANCE
     Routes.POSTGRADUATE_ATTENDANCE -> LoginType.POSTGRADUATE_ATTENDANCE
     Routes.LIBRARY -> LoginType.LIBRARY
     Routes.CAMPUS_CARD, Routes.PAYMENT_CODE -> LoginType.CAMPUS_CARD
@@ -850,6 +852,7 @@ class AppLoginStateViewModel(application: android.app.Application) : androidx.li
             register(com.xjtu.toolbox.auth.VenueSession())
             register(com.xjtu.toolbox.auth.AttendanceSession(isPostgraduate = false))
             register(com.xjtu.toolbox.auth.AttendanceSession(isPostgraduate = true))
+            register(com.xjtu.toolbox.auth.NewAttendanceSession())
             register(com.xjtu.toolbox.auth.CampusCardSession())
             register(com.xjtu.toolbox.auth.FitnessSession())
             register(com.xjtu.toolbox.auth.IclassfaceSession())
@@ -1644,6 +1647,11 @@ fun AppNavigation(
         composable(Routes.ATTENDANCE) {
             loginState.sessionManager?.getSiteOrNull("attendance")?.let { AttendanceScreen(site = it, onBack = { navController.popBackStack() }) } ?: LaunchedEffect(Unit) { navController.popBackStack() }
         }
+        composable(Routes.NEW_ATTENDANCE) {
+            loginState.sessionManager?.getSiteOrNull("new_attendance")?.let {
+                com.xjtu.toolbox.newattendance.NewAttendanceScreen(site = it, onBack = { navController.popBackStack() })
+            } ?: LaunchedEffect(Unit) { navController.popBackStack() }
+        }
         composable(Routes.POSTGRADUATE_ATTENDANCE) {
             loginState.sessionManager?.getSiteOrNull("pg_attendance")?.let { AttendanceScreen(site = it, onBack = { navController.popBackStack() }) } ?: LaunchedEffect(Unit) { navController.popBackStack() }
         }
@@ -2185,6 +2193,7 @@ private fun MainScreen(
             val autoLoginTimeoutMs = when (type) {
                 LoginType.COUPON,
                 LoginType.FITNESS,
+                LoginType.NEW_ATTENDANCE,
                 LoginType.JIAOXIAOZHI -> 180_000L
                 // 场馆/电子凭证等走「CAS OAuth → org 中转 → 业务站」多跳链路，
                 // 叠加 CasGate 限频与 WebVPN 改写后 25s 常不够用，超时即表现为"打不开"。
@@ -3786,6 +3795,7 @@ private fun HomeTab(
             Routes.CLASS_REPLAY to Icons.Default.OndemandVideo,
             Routes.SCHOOL_COURSE to Icons.Default.TravelExplore,
             Routes.ATTENDANCE to Icons.Default.EventAvailable,
+            Routes.NEW_ATTENDANCE to Icons.Default.AssignmentTurnedIn,
             Routes.POSTGRADUATE_ATTENDANCE to Icons.AutoMirrored.Filled.FactCheck,
             Routes.ICLASSFACE to Icons.Default.Face,
             Routes.MATCH to Icons.Default.Groups,
@@ -6273,6 +6283,7 @@ private fun siteKeyForBrowserUrl(url: String): String {
         "ywtb.xjtu.edu.cn" in host -> "ywtb"
         "ncard.xjtu.edu.cn" in host -> "campus_card"
         "bkkq.xjtu.edu.cn" in host -> "attendance"
+        "kq.xjtu.edu.cn" in host -> "new_attendance"
         "lms.xjtu.edu.cn" in host -> "lms"
         else -> "jwxt"
     }

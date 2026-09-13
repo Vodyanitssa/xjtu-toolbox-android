@@ -169,6 +169,55 @@ class IclassfaceSession : CasSiteSession("iclassface", "快速考勤流水", mus
         com.xjtu.toolbox.iclassface.IclassfaceLogin(session = client, visitorId = visitorId, cachedRsaKey = cachedRsaKey)
 }
 
+// ── NEW ATTENDANCE 新版考勤 kq.xjtu.edu.cn ──────────────────────────────
+
+class NewAttendanceSession : CasSiteSession("new_attendance", "新版考勤", mustUseWebVpn = false) {
+    override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
+        com.xjtu.toolbox.newattendance.NewAttendanceLogin(
+            session = client,
+            visitorId = visitorId,
+            cachedRsaKey = cachedRsaKey,
+        )
+
+    override fun onLoginSuccess(login: XJTULogin) {
+        val token = (login as? com.xjtu.toolbox.newattendance.NewAttendanceLogin)?.authToken
+        if (!token.isNullOrBlank()) localToken["business_token"] = token
+    }
+
+    override fun decorateRequest(builder: Request.Builder): Request.Builder {
+        localToken["business_token"]?.let { builder.header(com.xjtu.toolbox.newattendance.NewAttendanceLogin.TOKEN_HEADER, it) }
+        return builder
+    }
+
+    override fun isAuthFailureResponse(response: Response, bodyPreview: String?): Boolean {
+        if (super.isAuthFailureResponse(response, bodyPreview)) return true
+        val preview = bodyPreview ?: return false
+        if (Regex("\"code\"\\s*:\\s*4001").containsMatchIn(preview)) return true
+        return preview.contains("业务令牌") && (
+            preview.contains("过期") || preview.contains("无效") || preview.contains("未登录")
+        )
+    }
+
+    override suspend fun validateLogin(): Boolean = withIo {
+        val token = localToken["business_token"] ?: return@withIo false
+        val resp = client.newCall(
+            Request.Builder()
+                .url("${com.xjtu.toolbox.newattendance.NewAttendanceLogin.BASE_URL}/student/home")
+                .header(com.xjtu.toolbox.newattendance.NewAttendanceLogin.TOKEN_HEADER, token)
+                .get()
+                .build()
+        ).execute()
+        try {
+            if (resp.code != 200) return@withIo false
+            val body = resp.body?.string() ?: return@withIo false
+            if (XJTULogin.isAuthFailureResponse(body)) return@withIo false
+            body.safeParseJsonObject().get("code")?.takeIf { !it.isJsonNull }?.asInt == 0
+        } finally {
+            resp.close()
+        }
+    }
+}
+
 // ── HELLO 迎新/个人信息 ────────────────────────────────────────────────
 
 /**
