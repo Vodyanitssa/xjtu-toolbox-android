@@ -183,12 +183,13 @@ fun PidaiNavButton(
                 },
             contentAlignment = Alignment.Center,
         ) {
-            // 画布比触摸区大一圈：球和通知点/彩带需要更多作画空间，触摸目标保持 diameter
+            // 画布比触摸区大一圈：球和通知点/彗尾需要更多作画空间，触摸目标保持 diameter。
+            // 1.5 倍时球径约 1.23 倍触摸区（经典栏 ~46dp），是底栏高度约束下的舒适上限。
             BloubBotIcon(
                 beat = beat,
                 ink = MiuixTheme.colorScheme.onSurface,
                 paper = paper,
-                modifier = Modifier.size(diameter * 1.32f),
+                modifier = Modifier.size(diameter * 1.5f),
             )
         }
     }
