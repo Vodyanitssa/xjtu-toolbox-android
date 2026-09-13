@@ -1220,30 +1220,6 @@ fun AppNavigation(
         }
     }
 
-    // ── Srun 校园网（XJTU_STU）自动登录管理器 ──
-    DisposableEffect(Unit) {
-        val mgr = com.xjtu.toolbox.srun.SrunAutoLoginManager(
-            context = context,
-            credentialStore = credentialStore,
-            onResult = { result ->
-                val msg = when (result) {
-                    is com.xjtu.toolbox.srun.SrunAutoLoginManager.Result.Success ->
-                        "校园网已自动登录"
-                    is com.xjtu.toolbox.srun.SrunAutoLoginManager.Result.Failed ->
-                        "校园网自动登录失败：${result.message}"
-                    else -> null
-                }
-                msg?.let {
-                    android.os.Handler(android.os.Looper.getMainLooper()).post {
-                        android.widget.Toast.makeText(context, it, android.widget.Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-        )
-        mgr.register()
-        onDispose { mgr.unregister() }
-    }
-
     // 恢复凭据并自动初始化（Splash 只做启动，登录在主界面后台进行）
     var isRestoring by remember { mutableStateOf(false) }
     var restoreGateReady by remember { mutableStateOf(false) }
@@ -1998,20 +1974,6 @@ fun AppNavigation(
                     showQuickActions = v
                     credentialStore.showQuickActions = v
                 },
-                onAccountTypeChanged = { type ->
-                    loginState.accountType = type
-                    loginState.sessionManager?.accountType =
-                        if (type == com.xjtu.toolbox.auth.AccountType.POSTGRADUATE) {
-                            com.xjtu.toolbox.auth.XJTULogin.AccountType.POSTGRADUATE
-                        } else {
-                            com.xjtu.toolbox.auth.XJTULogin.AccountType.UNDERGRADUATE
-                        }
-                    val id = loginState.accountId
-                    if (id.isNotEmpty()) {
-                        val store = com.xjtu.toolbox.account.AccountStore(context)
-                        store.get(id)?.let { store.upsert(it.copy(accountType = type)) }
-                    }
-                }
             )
         }
 
@@ -4092,6 +4054,42 @@ private fun CoursesTab(
     }
 }
 
+/**
+ * 用学校登记的身份校正账号类型。
+ *
+ * 之前这个开关只能用户自己在设置里选，选错的后果不是"显示不对"而是 CAS
+ * 选身份时走错分支、一串子系统登不上，而普通用户根本没法判断自己该选哪个
+ * （"我是直博生算研究生吗"）。既然一网通办已经把身份告诉我们了，就别再问。
+ *
+ * 识别不出来时什么都不做——保留用户原有设置，不用猜测覆盖已知。
+ */
+private fun applyDetectedAccountType(
+    context: android.content.Context,
+    loginState: AppLoginState,
+    accountManager: com.xjtu.toolbox.account.AccountManager,
+    identityTypeName: String?,
+) {
+    val detected = com.xjtu.toolbox.auth.AccountType.fromIdentityName(identityTypeName) ?: return
+    if (detected == loginState.accountType) return
+    android.util.Log.d(
+        "AccountType",
+        "identityTypeName=$identityTypeName → $detected（原 ${loginState.accountType}）",
+    )
+    loginState.accountType = detected
+    loginState.sessionManager?.accountType =
+        if (detected == com.xjtu.toolbox.auth.AccountType.POSTGRADUATE) {
+            com.xjtu.toolbox.auth.XJTULogin.AccountType.POSTGRADUATE
+        } else {
+            com.xjtu.toolbox.auth.XJTULogin.AccountType.UNDERGRADUATE
+        }
+    com.xjtu.toolbox.util.CredentialStore(context).accountType = detected
+    val id = loginState.accountId
+    if (id.isNotEmpty()) {
+        val store = com.xjtu.toolbox.account.AccountStore(context)
+        store.get(id)?.let { store.upsert(it.copy(accountType = detected)) }
+    }
+}
+
 // ══════════════════════════════════════════
 //  Tab 3 — 仲英学辅资料站（zyxf.top）
 // ══════════════════════════════════════════
@@ -4617,13 +4615,6 @@ private fun ProfileTab(
             }
     }
 
-    // Srun 校园网首次配置弹窗状态
-    val showSrunSetupSheet = remember { mutableStateOf(false) }
-    var srunSetupUsername by remember { mutableStateOf("") }
-    var srunSetupPassword by remember { mutableStateOf("") }
-    var srunSetupSaving by remember { mutableStateOf(false) }
-    var srunSetupHint by remember { mutableStateOf<String?>(null) }
-
     // 智能登录：JWXT→核心登录→YWTB后台
     fun loginAllSystems(user: String, pwd: String) {
         val user = user.trim()
@@ -4659,13 +4650,6 @@ private fun ProfileTab(
             accountManager.persistCurrentLogin(user, pwd, loginState.accountType)
             loginState.persistCredentials(credentialStore)
 
-            // ── 首次登录后引导用户配置 Srun 校园网自动登录 ──
-            if (!credentialStore.srunSetupAsked) {
-                showSrunSetupSheet.value = true
-                // 默认填入主账号 + @stu 作为 Srun 用户名提示
-                srunSetupUsername = if (user.contains("@")) user else "$user@stu"
-            }
-
             // ── 后台: 仅预热必要 SSO，其余子系统由用户进入时按需登录 ──
             onWarmupRequest()
             scope.launch(kotlinx.coroutines.Dispatchers.IO) {
@@ -4677,6 +4661,12 @@ private fun ProfileTab(
                         loginState.ywtbUserInfo?.userName?.let { name ->
                             accountManager.updateNickname(user, name)
                         }
+                        // 身份（本科生/研究生）以学校的登记为准，不劳用户自己在设置里选。
+                        // identityTypeName 是一网通办返回的原字段，见 AccountType.fromIdentityName。
+                        applyDetectedAccountType(
+                            ctx, loginState, accountManager,
+                            loginState.ywtbUserInfo?.identityTypeName,
+                        )
                     }
                 } catch (_: Exception) { }
                 // 首次登录抓一次个人档案 + 头像并落盘，之后"我的"页直接读缓存。
@@ -4732,81 +4722,6 @@ private fun ProfileTab(
                     onClick = { if (!avatarSaving) showAvatarSheet = false },
                     modifier = Modifier.fillMaxWidth()
                 )
-            }
-        }
-    }
-
-    // ── Srun 校园网（XJTU_STU）首次配置弹窗（OverlayDialog 抗键盘弹飞）──
-    if (showSrunSetupSheet.value) {
-        OverlayDialog(
-            show = showSrunSetupSheet.value,
-            title = "校园网自动登录",
-            summary = "连接校园 WiFi 时自动帮你登录 Srun 网关，免去每次手动认证。",
-            onDismissRequest = {
-                showSrunSetupSheet.value = false
-                credentialStore.srunSetupAsked = true
-            }
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .imePadding(),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                TextField(
-                    value = srunSetupUsername,
-                    onValueChange = { srunSetupUsername = it; srunSetupHint = null },
-                    label = "校园网账号（含 @stu/@xjtu 后缀）",
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                TextField(
-                    value = srunSetupPassword,
-                    onValueChange = { srunSetupPassword = it; srunSetupHint = null },
-                    label = "校园网密码",
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password)
-                )
-                srunSetupHint?.let {
-                    Text(it, color = MiuixTheme.colorScheme.error, style = MiuixTheme.textStyles.footnote1)
-                }
-                Text(
-                    "凭据使用 Android Keystore 加密存储；仅当连接到 XJTU_STU 时本机自动发起登录。" +
-                        "可在「设置 → 校园网自动登录」中随时修改或关闭。",
-                    style = MiuixTheme.textStyles.footnote2,
-                    color = MiuixTheme.colorScheme.onSurfaceVariantSummary
-                )
-                Row(Modifier.fillMaxWidth()) {
-                    TextButton(
-                        text = "暂不开启",
-                        onClick = {
-                            credentialStore.srunSetupAsked = true
-                            credentialStore.srunAutoLoginEnabled = false
-                            showSrunSetupSheet.value = false
-                        },
-                        modifier = Modifier.weight(1f)
-                    )
-                    Spacer(Modifier.width(20.dp))
-                    TextButton(
-                        text = if (srunSetupSaving) "保存中..." else "启用并保存",
-                        onClick = {
-                            if (srunSetupUsername.isBlank() || srunSetupPassword.isBlank()) {
-                                srunSetupHint = "请填写账号和密码（或选择跳过）"
-                                return@TextButton
-                            }
-                            srunSetupSaving = true
-                            credentialStore.saveSrunCredentials(srunSetupUsername.trim(), srunSetupPassword)
-                            credentialStore.srunAutoLoginEnabled = true
-                            credentialStore.srunSetupAsked = true
-                            srunSetupSaving = false
-                            showSrunSetupSheet.value = false
-                        },
-                        enabled = !srunSetupSaving,
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.textButtonColorsPrimary()
-                    )
-                }
             }
         }
     }
@@ -5083,6 +4998,12 @@ private fun ProfileTab(
                     if (ywtbSite != null && loginState.ywtbUserInfo == null) {
                         runCatching {
                             loginState.ywtbUserInfo = com.xjtu.toolbox.ywtb.YwtbApi(ywtbSite).getUserInfo()
+                            // 老用户不会再走一次首登流程，身份校正得在这儿也挂一次，
+                            // 否则升级上来的人还停在当初手选的那个值上。
+                            applyDetectedAccountType(
+                                ctx, loginState, accountManager,
+                                loginState.ywtbUserInfo?.identityTypeName,
+                            )
                         }
                     }
                 }
@@ -5855,69 +5776,6 @@ private fun EulaScreen(onAccept: () -> Unit) {
         }
     }
 
-    val boldStyle = androidx.compose.ui.text.SpanStyle(fontWeight = FontWeight.Bold, color = MiuixTheme.colorScheme.primary)
-
-    // 条款数据 —— title + AnnotatedString body（关键语句加粗）
-    data class EulaSection(val title: String, val body: androidx.compose.ui.text.AnnotatedString)
-    val sections = listOf(
-        EulaSection(
-            "一、应用性质",
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("本应用（「岱宗盒子」）是西安交通大学学生自主开发的非官方校园工具，")
-                pushStyle(boldStyle); append("完全开源、无毒无害"); pop()
-                append("，通过模拟浏览器行为访问学校现有的 Web 服务接口，为学生提供统一便捷的校园信息查询体验。本应用不隶属于、不代表西安交通大学或其任何部门。")
-            }
-        ),
-        EulaSection(
-            "二、数据来源与使用",
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("本应用通过 HTTPS 协议访问学校各业务系统接口获取数据，校园系统请求均在您的设备上发起。您的账号凭据（用户名和密码）仅加密存储在本地设备中，不会上传至开发者服务器。")
-                pushStyle(boldStyle); append("请勿将账号、验证码、API Key 等敏感信息交给不可信来源。"); pop()
-            }
-        ),
-        EulaSection(
-            "三、AI 与第三方服务",
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("屁岱等 AI 功能由用户自行配置模型服务与 API Key。使用这些功能时，您的问题、上下文、工具查询结果、上传附件摘要等内容可能会发送给您选择的模型服务商或中转服务。")
-                pushStyle(boldStyle); append("请优先选择可信服务商，妥善保管 API Key，避免提交不希望第三方处理的个人信息。"); pop()
-                append("学校交晓智服务由上游系统处理，本应用仅提供原生入口与会话封装，回答内容仅供参考。")
-            }
-        ),
-        EulaSection(
-            "四、本地文件与下载",
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("成绩单、课件、作业附件等下载内容会按系统规则保存到本机下载目录或应用私有目录。保存到公共下载目录的文件可能被文件管理器、备份软件或具备相应权限的其他应用读取。请自行管理、删除或转移包含个人信息的文件。")
-            }
-        ),
-        EulaSection(
-            "五、免责声明",
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("1. 本应用按「按原样」（AS IS）提供，开发者不对其准确性、完整性、可用性或适用性作任何明示或暗示的保证。\n2. 因使用本应用导致的任何直接或间接损失（包括但不限于数据丢失、账号异常、学业影响等），开发者不承担任何责任。\n3. 若学校系统接口变更导致功能异常，开发者将尽力修复但不保证时效。\n4. 本应用可能因学校政策调整而需要停止服务，届时将提前告知用户。")
-            }
-        ),
-        EulaSection(
-            "六、合规声明",
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("1. 本应用仅供西安交通大学在校师生个人学习和生活使用，严禁用于任何商业用途。\n2. ")
-                pushStyle(boldStyle); append("本应用不提供抢选、抢课、刷分等牟利功能。"); pop()
-                append("\n3. ")
-                pushStyle(boldStyle); append("本应用不接入支付、退款等金额交易功能。"); pop()
-                append("\n4. 使用者应遵守学校各系统的使用规定和信息安全管理条例。\n5. 本应用会尽量复用会话并限制异常重试，但严禁利用本应用进行恶意请求、批量爬取、接口滥用等行为。违者应自行承担相应责任。")
-            }
-        ),
-        EulaSection(
-            "七、知识产权",
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("本应用源代码基于 MIT 协议开源，感谢相关项目的启发。所访问的各业务系统之数据、接口及商标均归西安交通大学及相关权利方所有。")
-            }
-        ),
-        EulaSection(
-            "八、条款变更",
-            androidx.compose.ui.text.buildAnnotatedString {
-                append("开发者保留随时修改本协议的权利。更新后的协议将在新版本发布时生效，继续使用本应用即视为接受修改后的条款。")
-            }
-        )
-    )
 
     Scaffold(
         topBar = {
@@ -5944,19 +5802,7 @@ private fun EulaScreen(onAccept: () -> Unit) {
             )
             Spacer(Modifier.height(16.dp))
 
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = top.yukonga.miuix.kmp.basic.CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceVariant)
-            ) {
-                Column(Modifier.padding(16.dp)) {
-                    sections.forEachIndexed { idx, section ->
-                        if (idx > 0) Spacer(Modifier.height(12.dp))
-                        Text(section.title, style = MiuixTheme.textStyles.subtitle, fontWeight = FontWeight.Bold, color = MiuixTheme.colorScheme.primary)
-                        Spacer(Modifier.height(4.dp))
-                        Text(section.body, style = MiuixTheme.textStyles.body2, color = MiuixTheme.colorScheme.onSurface, lineHeight = 20.sp)
-                    }
-                }
-            }
+            com.xjtu.toolbox.legal.Eula.Body()
 
             Spacer(Modifier.height(16.dp))
 

@@ -76,7 +76,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.xjtu.toolbox.BuildConfig
 import com.xjtu.toolbox.AutoUpdateDialog
-import com.xjtu.toolbox.auth.AccountType
 import com.xjtu.toolbox.util.AppUpdateInfo
 import com.xjtu.toolbox.util.AppUpdater
 import com.xjtu.toolbox.notification.NoticeWatchScheduler
@@ -124,7 +123,6 @@ fun SettingsScreen(
     onHomeThemeChanged: (String) -> Unit = {},
     showQuickActions: Boolean = true,
     onShowQuickActionsChanged: (Boolean) -> Unit = {},
-    onAccountTypeChanged: (AccountType) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -136,7 +134,6 @@ fun SettingsScreen(
     var defaultTab by remember { mutableStateOf(credentialStore.defaultTab) }
     var networkMode by remember { mutableStateOf(credentialStore.networkMode) }
     var updateChannel by remember { mutableStateOf(credentialStore.updateChannel) }
-    var accountType by remember { mutableStateOf(credentialStore.accountType) }
     var venueAutoSolveCaptcha by remember { mutableStateOf(credentialStore.venueAutoSolveCaptchaEnabled) }
     var theme by remember { mutableStateOf(homeTheme) }
     var cacheSizeText by remember { mutableStateOf("计算中...") }
@@ -238,8 +235,6 @@ fun SettingsScreen(
     )
     val channelOptions = AppUpdater.channelLabels
     val channelValues = AppUpdater.channelKeys
-    val accountTypeOptions = AccountType.entries.map { it.displayName }
-    val accountTypeValues = AccountType.entries.toList()
 
     Scaffold(
         topBar = {
@@ -383,146 +378,6 @@ fun SettingsScreen(
                         credentialStore.networkMode = v
                     }
                 )
-                OverlayDropdownPreference(
-                    title = "账号类型",
-                    items = accountTypeOptions,
-                    selectedIndex = accountTypeValues.indexOf(accountType).coerceAtLeast(0),
-                    summary = "影响登录身份、考勤入口和空闲教室查询方式",
-                    startAction = { SettingsIcon(MiuixIcons.Info, cBlue) },
-                    onSelectedIndexChange = { idx ->
-                        val v = accountTypeValues[idx]
-                        accountType = v
-                        credentialStore.accountType = v
-                        onAccountTypeChanged(v)
-                    }
-                )
-                // ── 校园网（XJTU_STU）自动登录 ──
-                var srunEnabled by remember { mutableStateOf(credentialStore.srunAutoLoginEnabled) }
-                val srunCreds = remember { mutableStateOf(credentialStore.loadSrunCredentials()) }
-                val showSrunEdit = remember { mutableStateOf(false) }
-                var srunTesting by remember { mutableStateOf(false) }
-                var srunTestResult by remember { mutableStateOf<String?>(null) }
-                SwitchPreference(
-                    title = "校园网自动登录",
-                    summary = if (srunEnabled) {
-                        if (srunCreds.value != null)
-                            "连接到 XJTU_STU 时自动登录（账号: ${srunCreds.value!!.first}）"
-                        else
-                            "已开启，请配置账号"
-                    } else "已关闭",
-                    checked = srunEnabled,
-                    startAction = { SettingsIcon(MiuixIcons.Carrier, cBlue) },
-                    onCheckedChange = {
-                        srunEnabled = it
-                        credentialStore.srunAutoLoginEnabled = it
-                    }
-                )
-                ArrowPreference(
-                    title = "校园网账号与密码",
-                    summary = srunCreds.value?.let { "${it.first} · 已保存" } ?: "未保存",
-                    startAction = { SettingsIcon(MiuixIcons.Info, cBlue) },
-                    onClick = { showSrunEdit.value = true }
-                )
-                ArrowPreference(
-                    title = "立即测试登录",
-                    summary = srunTestResult ?: (if (srunTesting) "正在测试..." else "手动触发一次校园网登录"),
-                    startAction = { SettingsIcon(Icons.Default.Refresh, cBlue) },
-                    onClick = {
-                        if (srunTesting) return@ArrowPreference
-                        srunTesting = true
-                        srunTestResult = null
-                        scope.launch(Dispatchers.IO) {
-                            try {
-                                val creds = credentialStore.loadSrunCredentials()
-                                if (creds == null) {
-                                    srunTestResult = "请先填写账号密码"
-                                    srunTesting = false
-                                    return@launch
-                                }
-                                val srun = com.xjtu.toolbox.srun.SrunLogin()
-                                srunTestResult = when (val st = srun.queryStatus()) {
-                                    is com.xjtu.toolbox.srun.SrunStatus.Online ->
-                                        "已在线（${st.username}）"
-                                    com.xjtu.toolbox.srun.SrunStatus.NotLoggedIn -> {
-                                        val r = srun.login(creds.first, creds.second)
-                                        if (r.success) "登录成功" else "登录失败：${r.message}"
-                                    }
-                                    com.xjtu.toolbox.srun.SrunStatus.Unreachable ->
-                                        "网关不可达（不在 Srun 网段）"
-                                    com.xjtu.toolbox.srun.SrunStatus.UNKNOWN ->
-                                        "状态未知"
-                                }
-                            } finally {
-                                srunTesting = false
-                            }
-                        }
-                    }
-                )
-                if (showSrunEdit.value) {
-                    var u by remember { mutableStateOf(srunCreds.value?.first ?: "") }
-                    var p by remember { mutableStateOf(srunCreds.value?.second ?: "") }
-                    OverlayDialog(
-                        show = showSrunEdit.value,
-                        title = "校园网账号",
-                        summary = "连接 XJTU_STU 时使用，账号需包含 @stu 或 @xjtu 后缀。",
-                        onDismissRequest = { showSrunEdit.value = false }
-                    ) {
-                        Column(
-                            Modifier.fillMaxWidth().imePadding(),
-                            verticalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            top.yukonga.miuix.kmp.basic.TextField(
-                                value = u, onValueChange = { u = it },
-                                label = "账号（含 @stu/@xjtu）",
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            top.yukonga.miuix.kmp.basic.TextField(
-                                value = p, onValueChange = { p = it },
-                                label = "密码",
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                                keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Password
-                                )
-                            )
-                            if (srunCreds.value != null) {
-                                TextButton(
-                                    text = "清除已保存的账号",
-                                    onClick = {
-                                        credentialStore.clearSrunCredentials()
-                                        srunCreds.value = null
-                                        showSrunEdit.value = false
-                                    },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    colors = ButtonDefaults.textButtonColors(
-                                        textColor = MiuixTheme.colorScheme.error
-                                    )
-                                )
-                            }
-                            Row(Modifier.fillMaxWidth()) {
-                                TextButton(
-                                    text = "取消",
-                                    onClick = { showSrunEdit.value = false },
-                                    modifier = Modifier.weight(1f)
-                                )
-                                Spacer(Modifier.width(20.dp))
-                                TextButton(
-                                    text = "保存",
-                                    onClick = {
-                                        if (u.isNotBlank() && p.isNotBlank()) {
-                                            credentialStore.saveSrunCredentials(u.trim(), p)
-                                            srunCreds.value = u.trim() to p
-                                            showSrunEdit.value = false
-                                        }
-                                    },
-                                    modifier = Modifier.weight(1f),
-                                    colors = ButtonDefaults.textButtonColorsPrimary()
-                                )
-                            }
-                        }
-                    }
-                }
             }
 
             // ── 教务通知 ──
@@ -916,27 +771,16 @@ private fun EulaSheet(show: Boolean, onDismiss: () -> Unit) {
         title = "用户协议与隐私政策",
         onDismissRequest = onDismiss
     ) {
+        // 正文来自 legal/Eula.kt —— 和首次启动时要求同意的那一份是同一份。
+        // 这里原来是另外手写的两段摘要，措辞和范围都跟首启页对不上，
+        // 等于用户在设置里读到的不是他当初同意的东西。
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
                 .navigationBarsPadding()
         ) {
-            Text("用户协议", style = MiuixTheme.textStyles.subtitle, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "本应用是非官方校园工具，仅用于个人学习、生活与校园信息查询。请遵守西安交通大学各信息系统使用规定，不要进行恶意请求、批量爬取、接口滥用或任何违规操作。",
-                style = MiuixTheme.textStyles.body2,
-                color = MiuixTheme.colorScheme.onSurfaceVariantSummary
-            )
-            Spacer(Modifier.height(16.dp))
-            Text("隐私政策", style = MiuixTheme.textStyles.subtitle, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "登录凭据仅在本地加密存储。校园系统请求由本机直接发起，不会向开发者服务器上传密码。使用屁岱等 AI 功能时，对话、上下文、工具结果或附件摘要可能会发送给您选择的模型服务商；请妥善保管 API Key，并选择可信来源。下载到公共 Download/XJTUToolBox 目录的文件可能被其他文件管理或备份工具读取，请自行管理敏感文件。",
-                style = MiuixTheme.textStyles.body2,
-                color = MiuixTheme.colorScheme.onSurfaceVariantSummary
-            )
+            com.xjtu.toolbox.legal.Eula.Body()
             Spacer(Modifier.height(8.dp))
         }
     }
