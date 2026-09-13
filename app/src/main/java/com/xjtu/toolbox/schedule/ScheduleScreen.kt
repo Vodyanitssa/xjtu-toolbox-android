@@ -819,6 +819,9 @@ fun ScheduleScreen(
         try { dataCache.put("schedule_last_term", gson.toJson(newTermCode)) } catch (_: Exception) {}
         textbooksLoaded = false
         textbooks = emptyList()
+        // 考试也要清。不清的话，新学期没有缓存考试时，屏幕上留着的是**上一个学期**的
+        // 考试安排——比空着更糟，用户会照着一个早就过去的日期去考试。
+        exams = emptyList()
         showingStaleData = false
         scope.launch {
             isSwitching = true
@@ -862,12 +865,19 @@ fun ScheduleScreen(
                             val freshHolidays = try { HolidayApi.getHolidayDates(context, forceRefresh = true) } catch (_: Exception) { emptyMap() }
                             holidayDates = freshHolidays
                             courses = ScheduleCache.filterByHolidays(freshCourses, freshStartDate, freshHolidays)
-                            // 缓存
+                            // 缓存。
+                            //
+                            // 考试**不分当前/历史**一律落盘：以前跟着 isOldTerm 一起只在
+                            // 历史学期写，于是这学期看过的考试从来没进过缓存；等它变成历史学期，
+                            // 课表封存（sealed）后连网络都不再请求 —— 翻回去就永远没有考试。
+                            // 这就是「历史学期没有考试」的来源。
+                            try {
+                                dataCache.put("exams_$newTermCode", gson.toJson(exams))
+                            } catch (_: Exception) {}
                             if (isOldTerm) {
                                 try {
                                     dataCache.put("schedule_$newTermCode", gson.toJson(freshCourses))
                                     ScheduleCache.writeOptimizedCourses(dataCache, gson, newTermCode, courses)
-                                    dataCache.put("exams_$newTermCode", gson.toJson(exams))
                                     if (freshStartDate != null) {
                                         dataCache.put("start_date_$newTermCode", gson.toJson(freshStartDate.toString()))
                                     }
@@ -931,6 +941,17 @@ fun ScheduleScreen(
                 Icon(Icons.Default.Add, contentDescription = "添加日程")
             }
         }
+        // 周视图/全学期总览：直接给一个按钮，点一下就换。
+        // 原来它藏在「更多 → 切到全学期总览」里——这是个每天都可能按的视图开关，
+        // 不是一年用一次的导出，埋两层菜单等于没有。
+        if (currentContent == "week") {
+            IconButton(onClick = { showAllWeeks = !showAllWeeks }) {
+                Icon(
+                    if (showAllWeeks) Icons.Default.DateRange else Icons.Default.CalendarMonth,
+                    contentDescription = if (showAllWeeks) "切回本周" else "看全学期",
+                )
+            }
+        }
         Box {
             IconButton(onClick = { showExportMenu = true }) {
                 Icon(Icons.Default.MoreVert, contentDescription = "更多")
@@ -942,13 +963,8 @@ fun ScheduleScreen(
                 onDismissRequest = { showExportMenu = false }
             ) {
                 ListPopupColumn {
-                    if (currentContent == "week") {
-                        ScheduleMenuRow(
-                            icon = if (showAllWeeks) Icons.Default.DateRange else Icons.Default.CalendarMonth,
-                            text = if (showAllWeeks) "切到每周视图" else "切到全学期总览",
-                            onClick = { showExportMenu = false; showAllWeeks = !showAllWeeks }
-                        )
-                    }
+                    // 视图切换已经提到工具栏上了，这里不再重复一份——
+                    // 同一个开关两个入口，用户按了哪个都得再确认一次状态。
                     if (termList.isNotEmpty()) {
                         ScheduleMenuRow(
                             icon = Icons.Default.SwapHoriz,
@@ -1014,7 +1030,14 @@ fun ScheduleScreen(
         AppSegmentedTabs(
             // 分级布局按"看多远"分，经典布局按"看什么"分。两套都是三格，切换时
             // 位置感不变，只是含义换了一套。
-            tabs = if (unifiedLayout) listOf("今日", "本周", "学期") else listOf("日程", "考试", "教材"),
+            //
+            // 中间那格跟着 showAllWeeks 改名：菜单里切到「全学期总览」之后，
+            // 标签还写着「本周」就是在骗人——用户看到的明明是整学期的网格。
+            tabs = if (unifiedLayout) {
+                listOf("今日", if (showAllWeeks) "全学期" else "本周", "学期")
+            } else {
+                listOf(if (showAllWeeks) "全学期" else "日程", "考试", "教材")
+            },
             selectedTabIndex = selectedTab,
             onTabSelected = { tab ->
                 selectedTab = tab
@@ -1442,6 +1465,9 @@ fun ScheduleScreen(
                                 SemesterCourseList(
                                     courses = filteredMergedCourses,
                                     textbooks = textbooks,
+                                    // 分级布局没有独立的「考试」页，整学期的考试就落在这一级——
+                                    // 「这学期还有哪些考试」本来就是学期尺度的问题。
+                                    exams = exams,
                                     // 学期一级一行代表整学期，说不出是哪一次课，
                                     // 所以不给回放也不给本次考勤。
                                     onCourseClick = {
@@ -1729,15 +1755,26 @@ private fun CourseDetailDialog(
                 }
             }
         }
+        // 标题一段、信息一块、下钻一块。原来是所有行平铺、统一 8dp，
+        // 标题、地点、时间、教材、回放一视同仁地排下来，看不出哪些是一组的。
         Column(
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Text(
-                course.courseName,
-                style = MiuixTheme.textStyles.headline2,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(bottom = 4.dp)
-            )
+            Column {
+                Text(
+                    course.courseName,
+                    style = MiuixTheme.textStyles.headline2,
+                    fontWeight = FontWeight.Bold,
+                )
+                course.courseType.takeIf { it.isNotBlank() && !isAgenda }?.let {
+                    Spacer(Modifier.height(3.dp))
+                    Text(
+                        it,
+                        style = MiuixTheme.textStyles.footnote1,
+                        color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                    )
+                }
+            }
             // 压成两行：谁在哪、什么时候。原来五行图标各占一行，一加下钻区就爆。
             val dayName = when (course.dayOfWeek) {
                 1 -> "一"; 2 -> "二"; 3 -> "三"; 4 -> "四"
@@ -1768,6 +1805,17 @@ private fun CourseDetailDialog(
                 "${it.date.monthValue}/${it.date.dayOfMonth} · 第${it.week}周"
             } ?: course.getWeeks().takeIf { it.isNotEmpty() }?.let { "${formatWeeks(it)}周" }
 
+            // 两行元信息合进一张卡：它们回答的是同一个问题（这门课在哪、什么时候），
+            // 裸排在弹窗底色上时和下面的下钻入口分不开。
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                cornerRadius = 12.dp,
+                colors = CardDefaults.defaultColors(color = MiuixTheme.colorScheme.surfaceVariant),
+            ) {
+            Column(
+                Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
             if (course.teacher.isNotEmpty() || course.location.isNotEmpty()) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
@@ -1811,7 +1859,9 @@ private fun CourseDetailDialog(
                     style = MiuixTheme.textStyles.body2,
                 )
             }
-            // 下钻区：教材 → 全文、课程回放、本课考勤。两套日程布局共用，见 CourseLinkSections。
+            }
+            }
+            // 下钻区：教材 → 全文、思源学堂、课程回放、本课考勤。见 CourseLinkSections。
             CourseLinkSections(
                 course = course,
                 textbooks = textbooks,

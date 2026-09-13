@@ -35,7 +35,31 @@ object CourseLinks {
      * 按课程名匹配——教材接口没有课程号这一列。
      * 名字带「（甲）」这类后缀时两边未必一致，所以精确优先、包含兜底。
      */
-    fun textbooksFor(courseName: String, all: List<TextbookItem>): List<TextbookItem> {
+    /**
+     * 找这门课的教材。
+     *
+     * 课程号优先：它是教务系统里的主键，两边一致就是同一门课，不用跟课程名的各种
+     * 写法（「大学物理」/「大学物理（一）」/「大学物理I」）较劲。只有拿不到课程号、
+     * 或者报表里那一列是空的，才退回按名字模糊匹配。
+     *
+     * @param courseCode 课表侧的课程号，空串表示不可用
+     */
+    fun textbooksFor(
+        courseName: String,
+        all: List<TextbookItem>,
+        courseCode: String = "",
+    ): List<TextbookItem> {
+        val code = courseCode.trim()
+        if (code.isNotEmpty()) {
+            // 课程号常带班号后缀（`MATH100101-05`），先精确、再取主段。
+            val byCode = all.filter { it.courseCode.trim().equals(code, ignoreCase = true) }
+                .ifEmpty {
+                    val stem = code.substringBefore('-').trim()
+                    if (stem.length < 4) emptyList()
+                    else all.filter { it.courseCode.trim().substringBefore('-').equals(stem, ignoreCase = true) }
+                }
+            if (byCode.isNotEmpty()) return byCode.filter { it.hasSubstantiveTextbook }
+        }
         val target = courseName.normalizedCourseName()
         if (target.isEmpty()) return emptyList()
         val exact = all.filter { it.courseName.normalizedCourseName() == target }
@@ -137,6 +161,47 @@ object CourseLinks {
      * 指定某一天的回放场次，不是"这个课格在整学期的所有周"——
      * 按星期几筛会把 7 天后、14 天后的全带进来。同一天多场是正常的（连堂各录一段）。
      */
+    /** 思源学堂课程列表缓存。一次会话里点开多门课不该反复拉同一份列表。 */
+    private var lmsCoursesCache: Box<List<com.xjtu.toolbox.lms.LmsCourseSummary>>? = null
+
+    /**
+     * 这门课在思源学堂对应哪门。
+     *
+     * 先按课程号精确配——两个系统用的是同一套教务课程号，这是唯一可靠的判据；
+     * 课程号常带班号后缀（`MATH100101-05`），所以再退一步比主段。
+     * 都不中才按课程名，且只认归一化后完全相同的，不做包含匹配：
+     * 「大学物理」能包含到「大学物理实验」，那是两门课，给错比不给更糟。
+     */
+    suspend fun lmsCourseFor(
+        manager: SessionManager?,
+        course: CourseItem,
+    ): com.xjtu.toolbox.lms.LmsCourseSummary? {
+        val site = manager.siteOrNull(LoginType.LMS) ?: return null
+        val all = lmsCoursesCache?.value ?: withContext(Dispatchers.IO) {
+            runCatching { com.xjtu.toolbox.lms.LmsApi(site).getMyCourses() }
+                .rethrowCancellation()
+                .getOrElse {
+                    Log.w(TAG, "lms courses failed", it)
+                    emptyList()
+                }
+        }.also { lmsCoursesCache = Box(it) }
+        if (all.isEmpty()) return null
+
+        val code = course.courseCode.trim()
+        if (code.isNotEmpty()) {
+            all.firstOrNull { it.courseCode.trim().equals(code, ignoreCase = true) }?.let { return it }
+            val stem = code.substringBefore('-').trim()
+            if (stem.length >= 4) {
+                all.firstOrNull {
+                    it.courseCode.trim().substringBefore('-').equals(stem, ignoreCase = true)
+                }?.let { return it }
+            }
+        }
+        val target = course.courseName.normalizedCourseName()
+        if (target.isEmpty()) return null
+        return all.firstOrNull { it.name.normalizedCourseName() == target }
+    }
+
     suspend fun replaySessionsOn(
         manager: SessionManager?,
         course: CourseItem,

@@ -14,6 +14,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.MenuBook
 import androidx.compose.material.icons.filled.FactCheck
+import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.OndemandVideo
 import androidx.compose.material.icons.filled.PlayCircleOutline
 import androidx.compose.runtime.Composable
@@ -75,7 +76,7 @@ fun CourseLinkSections(
     }
 
     val mine = remember(course.courseName, textbooks) {
-        CourseLinks.textbooksFor(course.courseName, textbooks)
+        CourseLinks.textbooksFor(course.courseName, textbooks, course.courseCode)
     }
 
     // ── 教材全文：只按 ISBN 精确查，查不到就没有这个入口 ──
@@ -122,9 +123,18 @@ fun CourseLinkSections(
         )?.recordOn(course, week)
     }
 
+    // ── 思源学堂：这门课的活动、作业、课件都在那边 ──
+    // 按课程号配，配不上就不给入口——给错课比不给更糟。
+    var lmsCourse by remember(course.courseCode, course.courseName) {
+        mutableStateOf<com.xjtu.toolbox.lms.LmsCourseSummary?>(null)
+    }
+    LaunchedEffect(course.courseCode, course.courseName) {
+        lmsCourse = CourseLinks.lmsCourseFor(manager, course)
+    }
+
     val hasBook = mine.isNotEmpty()
     val hasReplay = replay != null && occurrence != null
-    if (!hasBook && !hasReplay && record == null) return
+    if (!hasBook && !hasReplay && record == null && lmsCourse == null) return
 
     Spacer(Modifier.height(6.dp))
     HorizontalDivider(color = MiuixTheme.colorScheme.dividerLine, thickness = 0.5.dp)
@@ -159,6 +169,20 @@ fun CourseLinkSections(
             onClick = ft?.let {
                 { onNavigate(Routes.jiaocai1Reader(it.second.ssno, it.second.title)) }
             },
+        )
+    }
+
+    // 思源学堂。放在回放前面：作业和公告比录播更常被翻。
+    lmsCourse?.let { lc ->
+        LinkRow(
+            icon = Icons.Default.School,
+            tint = MiuixTheme.colorScheme.primary,
+            title = "思源学堂",
+            subtitle = listOfNotNull(
+                lc.name.takeIf { it.isNotBlank() && it != course.courseName },
+                lc.instructors.firstOrNull()?.name?.takeIf { it.isNotBlank() },
+            ).joinToString("  ·  ").ifBlank { "活动、作业与课件" },
+            onClick = { onNavigate(Routes.lmsCourse(lc.id)) },
         )
     }
 

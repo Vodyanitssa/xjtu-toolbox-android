@@ -266,6 +266,9 @@ object Routes {
      */
     const val CLASS_REPLAY_PATTERN = "class_replay?courseCode={courseCode}"
     const val LMS = "lms"
+
+    /** 直接落到思源学堂的某门课。courseId 是 LMS 自己的课程 ID。 */
+    fun lmsCourse(courseId: Int) = "lms?courseId=$courseId"
     const val JIAOCAI = "jiaocai"
     const val JIAOCAI1 = "jiaocai1"
     const val JIAOCAI1_READER = "jiaocai1_reader/{ssno}?title={title}"
@@ -1841,11 +1844,17 @@ fun AppNavigation(
                 onBack = { navController.popBackStack() }
             )
         }
-        composable(Routes.LMS) {
+        composable(
+            route = "lms?courseId={courseId}",
+            arguments = listOf(
+                navArgument("courseId") { type = NavType.StringType; nullable = true; defaultValue = null }
+            ),
+        ) { entry ->
             loginState.sessionManager?.getSiteOrNull("lms")?.let { site ->
                 com.xjtu.toolbox.lms.LmsScreen(
                     site = site,
-                    onBack = { navController.popBackStack() }
+                    onBack = { navController.popBackStack() },
+                    initialCourseId = entry.arguments?.getString("courseId")?.toIntOrNull(),
                 )
             } ?: LaunchedEffect(Unit) { navController.popBackStack() }
         }

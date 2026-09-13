@@ -62,7 +62,16 @@ data class TextbookItem(
     val publisher: String = "",
     val isbn: String = "",
     val price: String = "",
-    val edition: String = ""
+    val edition: String = "",
+    /**
+     * 课程号。
+     *
+     * 教材报表里本来就有这一列，之前 [mapHeaderColumn] 把它显式排除了
+     * （`"号" !in header`），于是教材只能按课程名去猜是哪门课——
+     * 而「大学物理」「大学物理（一）」「大学物理I」在两个系统里写法常常对不上。
+     * 有课程号就不必猜。老缓存没有这个字段，反序列化得空串，按名字匹配照旧。
+     */
+    val courseCode: String = "",
 ) {
     /**
      * 是否有实质性教材信息
@@ -561,7 +570,12 @@ class ScheduleApi(private val site: SiteSession) {
             val textbookName = col("textbook")
             if (courseName.isBlank() && textbookName.isBlank()) continue
 
-            textbooks.add(TextbookItem(courseName, textbookName, col("author"), col("publisher"), col("isbn"), col("price"), col("edition")))
+            textbooks.add(
+                TextbookItem(
+                    courseName, textbookName, col("author"), col("publisher"),
+                    col("isbn"), col("price"), col("edition"), col("courseCode"),
+                )
+            )
         }
         Log.d(TAG, "parseDivBasedReport: parsed ${textbooks.size} items")
         return textbooks
@@ -570,6 +584,9 @@ class ScheduleApi(private val site: SiteSession) {
     /** 列头关键词映射 */
     private fun mapHeaderColumn(header: String, index: Int, colMap: MutableMap<String, Int>) {
         when {
+            // 课程号要排在课程名前面判：「课程号」同时含"课程"，先判名会把它吃掉。
+            header == "课程号" || ("课程" in header && "号" in header) ||
+                "课程代码" in header || "课程编号" in header -> colMap["courseCode"] = index
             header == "课程名" || ("课程" in header && "名" in header && "号" !in header) -> colMap["course"] = index
             header == "书名" || "教材名" in header || ("教材" in header && "名" in header) -> colMap["textbook"] = index
             "主编" in header || "作者" in header || "编者" in header -> colMap["author"] = index
@@ -601,7 +618,8 @@ class ScheduleApi(private val site: SiteSession) {
                     publisher = col("publisher"),
                     isbn = col("isbn"),
                     price = col("price"),
-                    edition = col("edition")
+                    edition = col("edition"),
+                    courseCode = col("courseCode"),
                 )
             )
         }

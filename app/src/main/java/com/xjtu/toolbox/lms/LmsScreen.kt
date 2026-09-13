@@ -102,13 +102,31 @@ private sealed class LmsPage {
 // ════════════════════════════════════════
 
 @Composable
-fun LmsScreen(site: SiteSession, onBack: () -> Unit) {
+fun LmsScreen(
+    site: SiteSession,
+    onBack: () -> Unit,
+    /**
+     * 从日程页点「思源学堂」进来时带的课程 ID：课程列表一到就直接翻到那门课的活动页。
+     * 匹配不到（这门课没在思源开、或学期对不上）就停在课程列表，不额外报错——
+     * 用户到了他要去的系统，只是少了一跳。
+     */
+    initialCourseId: Int? = null,
+) {
     val appLoginState = LocalAppLoginState.current
     val context = LocalContext.current
     val api = remember(site) { LmsApi(site) }
 
     var currentPage by remember { mutableStateOf<LmsPage>(LmsPage.CourseList) }
     val cache = remember { LmsPageCache() }
+
+    // 只跳一次：跳完把意图消费掉，否则用户从活动页返回课程列表会被立刻弹回去。
+    var pendingCourseId by remember { mutableStateOf(initialCourseId) }
+    LaunchedEffect(cache.courses, pendingCourseId) {
+        val want = pendingCourseId ?: return@LaunchedEffect
+        val hit = cache.courses.firstOrNull { it.id == want } ?: return@LaunchedEffect
+        pendingCourseId = null
+        currentPage = LmsPage.ActivityList(hit)
+    }
 
     // 首次使用提示
     val prefs = remember { context.getSharedPreferences("feature_hints", Context.MODE_PRIVATE) }
