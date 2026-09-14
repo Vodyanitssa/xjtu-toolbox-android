@@ -186,6 +186,8 @@ class MainActivity : ComponentActivity() {
         val prefs = getSharedPreferences("app_settings", MODE_PRIVATE)
         darkModeOverrideState.value = prefs.getString("dark_mode", "system") ?: "system"
         dynamicColorState.value = prefs.getBoolean("dynamic_color", false)
+        // 屁岱形象（形状/颜色）在首帧前读入，免得底栏先闪一下默认圆再跳到用户选的样子
+        com.xjtu.toolbox.agent.PidaiAppearanceHost.load(this)
 
         // 后台保活：循环读 KeepAlivePrefs，真正续期走 sessionRefresher。
         com.xjtu.toolbox.auth.SessionKeepAlive.start(this)
@@ -2555,6 +2557,7 @@ private fun MainScreen(
                     // 渲染成会动的机器人而不是灰度线性图标 + 文字。
                     BottomTab.entries.forEach { tab ->
                         if (tab == BottomTab.PIDAI) {
+                            val (pidaiShape, pidaiInk) = com.xjtu.toolbox.agent.pidaiNavAppearance()
                             com.xjtu.toolbox.agent.PidaiNavButton(
                                 onClick = onPidaiTap,
                                 excited = com.xjtu.toolbox.agent.ProactiveBubbleHost.message != null,
@@ -2563,6 +2566,8 @@ private fun MainScreen(
                                 diameter = 38.dp,
                                 liftUp = 8.dp,
                                 paper = MiuixTheme.colorScheme.surface,
+                                ink = pidaiInk,
+                                shape = pidaiShape,
                                 modifier = Modifier.weight(1f),
                             )
                             return@forEach
@@ -2592,6 +2597,7 @@ private fun MainScreen(
                 ) {
                     BottomTab.entries.forEach { tab ->
                         if (tab == BottomTab.PIDAI) {
+                            val (pidaiShape, pidaiInk) = com.xjtu.toolbox.agent.pidaiNavAppearance()
                             com.xjtu.toolbox.agent.PidaiNavButton(
                                 onClick = onPidaiTap,
                                 excited = com.xjtu.toolbox.agent.ProactiveBubbleHost.message != null,
@@ -2599,6 +2605,8 @@ private fun MainScreen(
                                 selected = selectedTab == tab,
                                 diameter = 40.dp,
                                 paper = MiuixTheme.colorScheme.surfaceContainerHigh,
+                                ink = pidaiInk,
+                                shape = pidaiShape,
                             )
                             return@forEach
                         }
