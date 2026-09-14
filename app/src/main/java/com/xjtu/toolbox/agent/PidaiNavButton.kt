@@ -71,6 +71,13 @@ fun PidaiNavButton(
     liftUp: Dp = 0.dp,
     /** 眼洞露出的底色 = 底栏背景色（经典栏 surface，浮动栏 surfaceContainerHigh）。 */
     paper: Color = MiuixTheme.colorScheme.surface,
+    /**
+     * 身体墨色。"跟随主题"时应当传底栏前景色（`onSurface`），深色底栏才看得见；
+     * 用户选了具体颜色则由调用方换成该色。
+     */
+    ink: Color = MiuixTheme.colorScheme.onSurface,
+    /** 用户选择的形状轮廓；null = 圆形。 */
+    shape: DoubleArray? = null,
 ) {
     val scope = rememberCoroutineScope()
     val bounce = remember { Animatable(1f) }
@@ -187,8 +194,9 @@ fun PidaiNavButton(
             // 1.5 倍时球径约 1.23 倍触摸区（经典栏 ~46dp），是底栏高度约束下的舒适上限。
             BloubBotIcon(
                 beat = beat,
-                ink = MiuixTheme.colorScheme.onSurface,
+                ink = ink,
                 paper = paper,
+                shape = shape,
                 modifier = Modifier.size(diameter * 1.5f),
             )
         }

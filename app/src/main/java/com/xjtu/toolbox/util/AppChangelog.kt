@@ -34,6 +34,13 @@ object AppChangelog {
      * 新增版本只在最前面追加即可。
      */
     val ENTRIES: List<Pair<String, VersionChangelog>> = listOf(
+        "4.9.2" to VersionChangelog(
+            items = listOf(
+                "🎨" to "底栏的屁岱可以换样子和颜色了：八种形状、十几种配色，在屁岱页右上角「配置」最下面挑，选完当场就变，重启也记得",
+                "🌗" to "颜色多一项「跟随主题」并默认选中，深浅色模式下都看得清，不会挑了个颜色反而看不见",
+                "🔑" to "配置页把「助手名字、API Key、模型」挪到「回复风格」下面，密钥不再埋在很后面，配的时候好找"
+            )
+        ),
         "4.9.1" to VersionChangelog(
             items = listOf(
                 "✅" to "接入学校新版考勤：查流水、看统计，病假／私事假的申请、审批、撤回和销假都能办",
