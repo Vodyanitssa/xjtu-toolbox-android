@@ -427,6 +427,13 @@ class DzpzSession : CasSiteSession("dzpz", "电子凭证", mustUseWebVpn = false
 class VenueSession : CasSiteSession("venue", "场馆预订", mustUseWebVpn = false) {
     override fun createLogin(client: OkHttpClient, visitorId: String?, cachedRsaKey: String?): XJTULogin =
         VenueLogin(session = client, visitorId = visitorId, cachedRsaKey = cachedRsaKey)
+
+    /**
+     * 会话失效时场馆站把请求带去它**自己的**登录页（`/web/login/pre.html`，用户名密码表单），
+     * 不是统一认证页，基类认不出来：订单页就会把这个登录页当数据去解析，显示出一堆网页文字。
+     */
+    override fun isAuthFailureResponse(response: Response, bodyPreview: String?): Boolean =
+        super.isAuthFailureResponse(response, bodyPreview) || response.request.url.encodedPath.startsWith("/web/login/")
 }
 
 // ── SSN 宿舍电费 ──────────────────────────────────────────────────────
