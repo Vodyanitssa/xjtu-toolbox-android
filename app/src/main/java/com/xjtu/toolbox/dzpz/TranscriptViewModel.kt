@@ -2,7 +2,6 @@ package com.xjtu.toolbox.dzpz
 
 import androidx.compose.runtime.getValue
 import com.xjtu.toolbox.error.FriendlyError
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
@@ -28,7 +27,6 @@ internal class TranscriptViewModel(
     var isLoading by mutableStateOf(true); private set
     var errorMessage by mutableStateOf<String?>(null); private set
     var formContext by mutableStateOf<TranscriptApi.FormContext?>(null); private set
-    var selectedTypeIndex by mutableIntStateOf(0)
 
     var workflowState by mutableStateOf(WorkflowState.IDLE); private set
     var workflowProgress by mutableStateOf(""); private set
@@ -61,7 +59,8 @@ internal class TranscriptViewModel(
 
     fun start() {
         val ctx = formContext ?: return
-        val type = ctx.typeOptions.getOrNull(selectedTypeIndex)?.value ?: return
+        // 只能下本科生成绩单，且换到别的类型学校会直接报错，网页也不让选：一律用表单第一项
+        val type = ctx.typeOptions.firstOrNull()?.value ?: return
         if (workflowState == WorkflowState.RUNNING) return
         workflowState = WorkflowState.RUNNING
         viewModelScope.launch {
@@ -71,8 +70,8 @@ internal class TranscriptViewModel(
                     return withContext(Dispatchers.IO) { block() }
                 }
                 val linkage = step("正在获取学籍信息...") { api.getLinkageData(ctx, type) }
-                val docId = step("正在生成成绩单...") { api.generatePreviewPdf(ctx.workflowId, type) }
-                val first = step("正在提交申请...") { api.submitCreate(ctx, linkage, type, docId) }
+                val first = step("正在保存申请...") { api.submitCreate(ctx, linkage, type) }
+                step("正在生成成绩单...") { api.generatePreviewPdf(ctx.workflowId, type, first.requestId) }
                 val second = step("正在处理签章...") { api.reloadAndForward(ctx, first, type) }
                 val info = step("正在获取下载链接...") { api.getDownloadInfo(second) }
                 downloadInfo = info
