@@ -216,6 +216,41 @@ class InboxTest {
     }
 
     @Test
+    fun `点开气泡：对应的收纳消息标已读，待办标已看，别的不动`() {
+        val grade = msg("grade:30", "出了 2 门新成绩", now - hour, InboxCategories.GRADE)
+        val other = msg("attendance:x", "考勤异常", now - hour, InboxCategories.ATTENDANCE)
+        val todo = OwnInbox.todo(InboxCategories.COUPON, "coupon:pending", "加餐券", "有 2 张加餐券没领", "coupon").copy(time = now)
+        val data = InboxData(messages = listOf(grade, other), todos = mapOf(InboxCategories.COUPON to listOf(todo)))
+
+        val byCategory = InboxRules.acknowledge(data, emptyList(), InboxCategories.GRADE, now)
+        assertTrue("grade:30" in byCategory.readAt)
+        assertFalse("attendance:x" in byCategory.readAt)
+
+        val byId = InboxRules.acknowledge(data, listOf("attendance:x"), null, now)
+        assertTrue("attendance:x" in byId.readAt)
+        assertFalse("grade:30" in byId.readAt)
+
+        val todos = InboxRules.acknowledge(data, emptyList(), InboxCategories.COUPON, now)
+        assertTrue("coupon:pending" in todos.seenTodos)
+        // 看过的待办还在列表里，只是不再算红点
+        assertEquals(1, InboxRules.todos(todos, now).size)
+        assertEquals(0, InboxRules.badge(todos.copy(messages = emptyList()), now))
+    }
+
+    @Test
+    fun `已读的不重新记时刻`() {
+        val data = InboxData(messages = listOf(msg("a", "x", now - hour, InboxCategories.GRADE)), readAt = mapOf("a" to 5L))
+        assertEquals(5L, InboxRules.acknowledge(data, listOf("a"), InboxCategories.GRADE, now).readAt["a"])
+    }
+
+    @Test
+    fun `系统通知点进的页面对应哪类收纳`() {
+        assertEquals(InboxCategories.GRADE, InboxCategories.ofRoute(com.xjtu.toolbox.nav.AppRoute.JwappScore))
+        assertEquals(InboxCategories.LMS, InboxCategories.ofRoute(com.xjtu.toolbox.nav.AppRoute.Lms(3)))
+        assertNull(InboxCategories.ofRoute(com.xjtu.toolbox.nav.AppRoute.Settings))
+    }
+
+    @Test
     fun `解析事务中心待办：带办理链接`() {
         val json = """{"code":0,"data":{"pageIndex":2,"items":[
             {"nodeName":"成绩单申请","addTime":"2026-09-11 16:20:27","title":"在校本科生电子成绩单申请","custom1":"师生可信电子凭证门户",
