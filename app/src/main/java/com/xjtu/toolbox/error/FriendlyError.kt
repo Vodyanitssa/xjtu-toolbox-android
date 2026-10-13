@@ -38,6 +38,7 @@ object FriendlyError {
             is PasswordInvalidatedException, is LoginCooldownException, is MfaRequiredException,
             is MfaCancelledException, is AccountSwitchedException ->
                 e.message?.takeIf { it.isNotBlank() } ?: "${defaultAction}失败，请稍后重试"
+            is com.xjtu.toolbox.webvpn.WebVpnDeniedException -> e.message ?: com.xjtu.toolbox.webvpn.WebVpnDeniedException.MESSAGE
             is UnknownHostException -> "无法连接到服务器，请检查网络"
             is SocketTimeoutException -> "请求超时，请稍后重试"
             is ConnectException -> "无法连接到服务器，请检查网络或 VPN 设置"

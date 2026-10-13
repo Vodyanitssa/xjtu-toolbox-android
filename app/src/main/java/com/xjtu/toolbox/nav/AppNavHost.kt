@@ -293,6 +293,7 @@ fun AppNavHost(
             WebVpnConverterScreen(
                 onBack = back,
                 onOpenWithWebVpn = onOpenWithWebVpn,
+                onOpenApply = { router.open(AppRoute.Browser(com.xjtu.toolbox.webvpn.WebVpnDenied.APPLY_URL)) },
             )
         }
         // 日程、屁岱是底栏 tab，付款码是覆盖层，都不进返回栈（见 AppRouter.open）
@@ -330,7 +331,7 @@ private fun siteKeyForHost(host: String): String = when {
     "tyxylp.xjtu.edu.cn" in host -> "fitness"
     "rg.lib.xjtu.edu.cn" in host -> "library"
     "jwapp.xjtu.edu.cn" in host -> "jwapp"
-    "ywtb.xjtu.edu.cn" in host -> "ywtb"
+    "ywtb.xjtu.edu.cn" in host || "workflow.xjtu.edu.cn" in host -> "ywtb"
     "ncard.xjtu.edu.cn" in host -> "campus_card"
     "kq.xjtu.edu.cn" in host -> "new_attendance"
     "lms.xjtu.edu.cn" in host -> "lms"
