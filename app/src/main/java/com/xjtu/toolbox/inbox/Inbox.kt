@@ -78,7 +78,7 @@ object InboxCategories {
         InboxCategory(SCHOOL_TODO, "学校事务中心"),
         InboxCategory(BOOKING, "预约中心 / 校车预约"),
         InboxCategory(LIBRARY, "图书馆座位签到 / 返回"),
-        InboxCategory(LMS, "思源学堂作业截止"),
+        InboxCategory(LMS, "思源学堂作业 / 测试截止"),
         InboxCategory(COUPON, "加餐券"),
         InboxCategory(JUDGE, "评教未完成"),
     )
@@ -347,14 +347,16 @@ object OwnInbox {
     fun todo(category: String, id: String, source: String, title: String, route: String?, expiresAt: Long = 0L) =
         InboxItem(id = id, category = category, source = source, title = title, time = System.currentTimeMillis(), route = route, expiresAt = expiresAt)
 
-    /** 思源学堂还没交、没过截止的作业。 */
+    /** 思源学堂还没交、没过截止的作业和测试。 */
     fun lmsTodos(items: List<com.xjtu.toolbox.lms.LmsDue>): List<InboxItem> = items
         .filter { !it.submitted }
         .mapNotNull { d ->
             val deadline = runCatching { Instant.parse(d.deadline).toEpochMilli() }.getOrNull() ?: return@mapNotNull null
             InboxItem(
-                id = "lms:${d.courseId}:${d.activityId}", category = InboxCategories.LMS, source = d.courseName,
-                title = d.title, time = d.fetchedAt, route = com.xjtu.toolbox.nav.AppRoute.Lms(d.courseId).id, expiresAt = deadline,
+                id = (if (d.exam) "lms:exam:" else "lms:") + "${d.courseId}:${d.activityId}",
+                category = InboxCategories.LMS, source = d.courseName,
+                title = if (d.exam) "测试 · ${d.title}" else d.title,
+                time = d.fetchedAt, route = com.xjtu.toolbox.nav.AppRoute.Lms(d.courseId).id, expiresAt = deadline,
             )
         }
 }

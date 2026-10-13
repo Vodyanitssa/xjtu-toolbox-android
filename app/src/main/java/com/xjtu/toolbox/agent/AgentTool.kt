@@ -2272,6 +2272,7 @@ class AgentToolRegistry(
 
     private suspend fun getLmsActivities(course: String?): String {
         if (course.isNullOrBlank()) return ToolReply.missing("course")
+        com.xjtu.toolbox.lms.LmsActivityType.EXAM -> "测试"
         val site = ensureSite(LoginType.LMS)
             ?: return loginHint(LoginType.LMS)
         return try {

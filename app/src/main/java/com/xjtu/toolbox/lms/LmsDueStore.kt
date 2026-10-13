@@ -11,6 +11,7 @@ import java.time.Instant
  * @param deadline ISO-8601，取自 [LmsActivity.deadlineInstant]（优先 `deadline`，
  * 缺失退回 `endTime`），与截止提醒通知同一口径。
  * @param submitted 详情里的 `user_submit_count > 0`（列表不给，见 [LmsDueCollector.collect]）。
+ * @param exam 学堂的「测试」：来自首页待办接口，`activityId` 是测试 id，只进待办，不进日程和提醒。
  */
 @kotlinx.serialization.Serializable
 data class LmsDue(
@@ -21,6 +22,7 @@ data class LmsDue(
     val deadline: String = "",
     val submitted: Boolean = false,
     val fetchedAt: Long = 0L,
+    val exam: Boolean = false,
 )
 
 /**
@@ -57,13 +59,13 @@ object LmsDueStore {
     private fun loadRaw(cache: DataCache): List<LmsDue> = cache.read<List<LmsDue>>(KEY, Long.MAX_VALUE).orEmpty()
 
     /**
-     * 按 (courseId, activityId) 合并：同一条以 fetchedAt 较新的为准；
+     * 按 (courseId, activityId, exam) 合并：同一条以 fetchedAt 较新的为准；
      * 截止时间早于「现在减 1 天」的条目丢掉——留着也没人会看已经过期一天以上的作业。
      */
     internal fun mergeDue(existing: List<LmsDue>, incoming: List<LmsDue>, now: Instant = Instant.now()): List<LmsDue> {
         val cutoff = now.minus(EXPIRE_MARGIN)
         return (existing + incoming)
-            .groupBy { it.courseId to it.activityId }
+            .groupBy { Triple(it.courseId, it.activityId, it.exam) }
             .values
             .map { group -> group.maxBy { it.fetchedAt } }
             .filter { item -> runCatching { Instant.parse(item.deadline) }.getOrNull()?.isAfter(cutoff) ?: true }

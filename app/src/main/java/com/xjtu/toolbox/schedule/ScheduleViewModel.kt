@@ -170,7 +170,7 @@ internal class ScheduleViewModel(context: Context, private val login: AppLoginSt
             // 先只读缓存上屏，再联网刷新
             withContext(Dispatchers.IO) { HolidayApi.peekCached(context) }.takeIf { it.isNotEmpty() }?.let { holidayDates = it }
             try { holidayDates = HolidayApi.getHolidayDates(context) } catch (_: Exception) {}
-            homeworkDue = withContext(Dispatchers.IO) { runCatching { LmsDueStore.load(context, account) }.getOrDefault(emptyList()) }
+            homeworkDue = withContext(Dispatchers.IO) { runCatching { LmsDueStore.load(context, account).filter { !it.exam } }.getOrDefault(emptyList()) }
         }
     }
 
