@@ -54,6 +54,7 @@ internal class LmsPageCache(private val disk: DataCache) {
     var courses by mutableStateOf<List<LmsCourseSummary>>(emptyList())
     var selectedSemester by mutableStateOf<String?>(null)
     val activities = mutableStateMapOf<Int, List<LmsActivity>>()
+    val bulletins = mutableStateMapOf<Int, List<LmsBulletin>>()
     val selectedTypes = mutableStateMapOf<Int, LmsActivityType?>()
     val details = mutableStateMapOf<Int, LmsActivity>()
 
@@ -61,8 +62,10 @@ internal class LmsPageCache(private val disk: DataCache) {
     var coursesSynced by mutableStateOf(false)
         private set
     private val syncedActivities = mutableSetOf<Int>()
+    private val syncedBulletins = mutableSetOf<Int>()
 
     fun activitiesSynced(courseId: Int) = courseId in syncedActivities
+    fun bulletinsSynced(courseId: Int) = courseId in syncedBulletins
 
     suspend fun syncCourses(api: LmsApi) {
         if (courses.isEmpty()) disk.readIo<List<LmsCourseSummary>>(COURSES_KEY)?.let { courses = it }
@@ -75,6 +78,13 @@ internal class LmsPageCache(private val disk: DataCache) {
         if (activities[courseId] == null) disk.readIo<List<LmsActivity>>(key)?.let { activities[courseId] = it }
         activities[courseId] = withContext(Dispatchers.IO) { api.getCourseActivities(courseId).also { disk.writeSafe(key, it) } }
         syncedActivities += courseId
+    }
+
+    suspend fun syncBulletins(api: LmsApi, courseId: Int) {
+        val key = "lms_bulletins_$courseId"
+        if (bulletins[courseId] == null) disk.readIo<List<LmsBulletin>>(key)?.let { bulletins[courseId] = it }
+        bulletins[courseId] = withContext(Dispatchers.IO) { api.getCourseBulletins(courseId).also { disk.writeSafe(key, it) } }
+        syncedBulletins += courseId
     }
 
     /** 作业 id → 交过没有。列表接口不给 `user_submit_count`，看作业时由 [syncSubmitted] 逐条查详情补上。 */
@@ -116,6 +126,7 @@ private sealed class LmsPage {
     data object CourseList : LmsPage()
     data class ActivityList(val course: LmsCourseSummary) : LmsPage()
     data class ActivityDetail(val course: LmsCourseSummary, val activity: LmsActivity) : LmsPage()
+    data class BulletinDetail(val course: LmsCourseSummary, val bulletin: LmsBulletin) : LmsPage()
     /** 视频播放器页面（直播 HLS 或录播） */
     data class VideoPlayer(
         val title: String,
@@ -238,6 +249,7 @@ fun LmsScreen(
         currentPage = when (cur) {
             is LmsPage.VideoPlayer -> cur.returnPage
             is LmsPage.ActivityDetail -> LmsPage.ActivityList(cur.course)
+            is LmsPage.BulletinDetail -> LmsPage.ActivityList(cur.course)
             is LmsPage.ActivityList -> LmsPage.CourseList
             else -> LmsPage.CourseList
         }
@@ -265,7 +277,7 @@ fun LmsScreen(
         transitionSpec = {
             val forward = when {
                 targetState is LmsPage.ActivityList && initialState is LmsPage.CourseList -> true
-                targetState is LmsPage.ActivityDetail && initialState is LmsPage.ActivityList -> true
+                (targetState is LmsPage.ActivityDetail || targetState is LmsPage.BulletinDetail) && initialState is LmsPage.ActivityList -> true
                 targetState is LmsPage.VideoPlayer -> true
                 else -> false
             }
@@ -301,7 +313,8 @@ fun LmsScreen(
                 // 标题栏的返回箭头要和系统返回键一致：深链进来的直接退出，
                 // 否则点箭头仍会掉进那个用户没进过的课程列表。
                 onBack = { if (deepLinked) onBack() else currentPage = LmsPage.CourseList },
-                onActivitySelected = { currentPage = LmsPage.ActivityDetail(page.course, it) }
+                onActivitySelected = { currentPage = LmsPage.ActivityDetail(page.course, it) },
+                onBulletinSelected = { currentPage = LmsPage.BulletinDetail(page.course, it) }
             )
             is LmsPage.ActivityDetail -> ActivityDetailPage(
                 api = api,
@@ -320,6 +333,12 @@ fun LmsScreen(
                         startInDual = startInDual,
                     )
                 }
+            )
+            is LmsPage.BulletinDetail -> BulletinDetailPage(
+                api = api,
+                course = page.course,
+                bulletin = page.bulletin,
+                onBack = { currentPage = LmsPage.ActivityList(page.course) }
             )
             is LmsPage.VideoPlayer -> { /* handled above */ }
         }
