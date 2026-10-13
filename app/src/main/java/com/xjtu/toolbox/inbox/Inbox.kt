@@ -26,6 +26,11 @@ data class InboxItem(
     val route: String? = null,
     /** 到点就不再显示（作业截止、预约开始），0 表示不过期。 */
     val expiresAt: Long = 0L,
+    /**
+     * 过了 [expiresAt] 也不消失，留到办完或删除（用户自己建的待办）。[expiresAt] 此时只当截止时间用：
+     * 排序、「24 小时内截止」「已逾期」分组都靠它。也不受消息保留期约束。
+     */
+    val sticky: Boolean = false,
 )
 
 /** 办完（或被用户忽略）的待办，灰着留 [InboxRules.FINISHED_KEEP_MS]。 */
@@ -67,6 +72,8 @@ object InboxCategories {
     const val COUPON = "todo.coupon"
     const val JUDGE = "todo.judge"
     const val LIBRARY = "todo.library"
+    /** 用户自己建的待办，见 [SelfTodo]。 */
+    const val SELF = "todo.self"
     const val GRADE = "msg.grade"
     const val SCHEDULE = "msg.schedule"
     const val ATTENDANCE = "msg.attendance"
@@ -75,6 +82,7 @@ object InboxCategories {
     private const val SCHOOL_PREFIX = "school:"
 
     val todos = listOf(
+        InboxCategory(SELF, "我的待办"),
         InboxCategory(SCHOOL_TODO, "学校事务中心"),
         InboxCategory(BOOKING, "预约中心 / 校车预约"),
         InboxCategory(LIBRARY, "图书馆座位签到 / 返回"),
@@ -90,14 +98,6 @@ object InboxCategories {
         InboxCategory(BULLETIN, "工具箱公告"),
     )
 
-    fun school(label: String) = SCHOOL_PREFIX + label
-    fun isSchool(key: String) = key.startsWith(SCHOOL_PREFIX)
-    fun schoolLabel(key: String) = key.removePrefix(SCHOOL_PREFIX)
-
-    /** 每类一个颜色（ARGB），收纳页图标和桌面小组件的色条共用。 */
-    fun argb(category: String): Int = when (category) {
-        SCHOOL_TODO -> 0xFF3B82F6
-        BOOKING -> 0xFF14B8A6
     /** 从系统通知点进这个页面，就等于看过这一类收纳内容；没有对应的返回 null。 */
     fun ofRoute(route: com.xjtu.toolbox.nav.AppRoute): String? = when (route) {
         com.xjtu.toolbox.nav.AppRoute.JwappScore -> GRADE
@@ -110,6 +110,15 @@ object InboxCategories {
         else -> null
     }
 
+    fun school(label: String) = SCHOOL_PREFIX + label
+    fun isSchool(key: String) = key.startsWith(SCHOOL_PREFIX)
+    fun schoolLabel(key: String) = key.removePrefix(SCHOOL_PREFIX)
+
+    /** 每类一个颜色（ARGB），收纳页图标和桌面小组件的色条共用。 */
+    fun argb(category: String): Int = when (category) {
+        SELF -> 0xFF22C55E
+        SCHOOL_TODO -> 0xFF3B82F6
+        BOOKING -> 0xFF14B8A6
         LIBRARY -> 0xFF0D9488
         LMS -> 0xFF8B5CF6
         COUPON -> 0xFFF97316
@@ -164,7 +173,7 @@ object InboxRules {
     fun replaceTodos(data: InboxData, category: String, items: List<InboxItem>, now: Long): InboxData {
         val newIds = items.mapTo(HashSet()) { it.id }
         val vanished = data.todos[category].orEmpty().filter {
-            it.id !in newIds && it.id !in data.ignored && (it.expiresAt == 0L || it.expiresAt > now)
+            it.id !in newIds && it.id !in data.ignored && (it.sticky || it.expiresAt == 0L || it.expiresAt > now)
         }
         val todos = data.todos + (category to items)
         val activeIds = todos.values.flatten().mapTo(HashSet()) { it.id }
@@ -193,7 +202,7 @@ object InboxRules {
         else data.copy(readAt = data.read.associateWith { now } + data.readAt, read = emptySet())
 
     private fun visible(item: InboxItem, now: Long) =
-        (item.expiresAt == 0L || item.expiresAt > now) && (item.expiresAt > 0L || now - item.time < KEEP_MS)
+        item.sticky || (item.expiresAt == 0L || item.expiresAt > now) && (item.expiresAt > 0L || now - item.time < KEEP_MS)
 
     /** 图书馆座位的签到、超时释放：几分钟就过期，座位状态在图书馆页随时能查，不收。借阅到期之类照收。 */
     fun isShortLived(source: String) = source == "图书馆预约系统" || "座位" in source
@@ -208,15 +217,6 @@ object InboxRules {
         return data.copy(messages = kept, readAt = data.readAt.filterKeys { it in ids }, bubbled = data.bubbled.filterTo(HashSet()) { it in ids })
     }
 
-    /** 学校正文末尾括号里的落款，如「(公寓用电管理系统)」，拿来当来源名。 */
-    fun signature(text: String): String? =
-        Regex("""[(（]([^()（）]{2,24})[)）]\s*$""").find(text.trim())?.groupValues?.get(1)?.trim()
-
-    fun plainText(html: String): String =
-        html.replace(Regex("<br\\s*/?>|</p>", RegexOption.IGNORE_CASE), "\n")
-            .replace(Regex("<[^>]+>"), "")
-            .replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
-            .lines().joinToString("\n") { it.trim() }.trim()
     /**
      * 用户已经在别处（屁岱气泡、系统通知）看过这件事：[ids] 和 [category] 下的消息标已读，
      * [category] 下的待办标已看。气泡和收纳是同一件事的两个出口，不能各算各的已读。
@@ -230,6 +230,15 @@ object InboxRules {
         )
     }
 
+    /** 学校正文末尾括号里的落款，如「(公寓用电管理系统)」，拿来当来源名。 */
+    fun signature(text: String): String? =
+        Regex("""[(（]([^()（）]{2,24})[)）]\s*$""").find(text.trim())?.groupValues?.get(1)?.trim()
+
+    fun plainText(html: String): String =
+        html.replace(Regex("<br\\s*/?>|</p>", RegexOption.IGNORE_CASE), "\n")
+            .replace(Regex("<[^>]+>"), "")
+            .replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+            .lines().joinToString("\n") { it.trim() }.trim()
 }
 
 /**
@@ -307,6 +316,12 @@ object InboxStore {
 
     fun markAllRead() = markRead(load().messages.map { it.id })
 
+    /** 在收纳以外看过了（点了屁岱气泡等）：对应消息标已读、待办标已看。见 [InboxRules.acknowledge]。 */
+    fun acknowledge(ids: Collection<String> = emptyList(), category: String? = null) {
+        if (ids.isEmpty() && category == null) return
+        update(AccountContext.activeAccountId) { InboxRules.acknowledge(it, ids, category, System.currentTimeMillis()) }
+    }
+
     /** 待办页看过的待办不再算进首页红点。 */
     fun markTodosSeen(ids: Collection<String>) {
         val d = load()
@@ -316,12 +331,6 @@ object InboxStore {
     fun ignoreTodo(id: String) = update(AccountContext.activeAccountId) { InboxRules.ignore(it, id, System.currentTimeMillis()) }
 
     fun markBubbled(id: String) = update(AccountContext.activeAccountId) { it.copy(bubbled = it.bubbled + id) }
-    /** 在收纳以外看过了（点了屁岱气泡等）：对应消息标已读、待办标已看。见 [InboxRules.acknowledge]。 */
-    fun acknowledge(ids: Collection<String> = emptyList(), category: String? = null) {
-        if (ids.isEmpty() && category == null) return
-        update(AccountContext.activeAccountId) { InboxRules.acknowledge(it, ids, category, System.currentTimeMillis()) }
-    }
-
 
     fun setEnabled(category: String, enabled: Boolean) =
         update(AccountContext.activeAccountId) { it.copy(off = if (enabled) it.off - category else it.off + category) }

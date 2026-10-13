@@ -492,8 +492,29 @@ class AgentToolRegistry(
                 "days" to strProp("重复星期，逗号分隔：MON,TUE,WED,THU,FRI,SAT,SUN。缺省：单次。"),
                 required = listOf("hour"),
             )))
+        arr.add(tool("add_todo",
+            "往待办里记一件事：有截止或没有具体时间、不占课表时段的事（交报告、买票、回邮件）。出现在「消息 → 待办」，到点推送提醒。" +
+                "要占一段具体时间的（开会、自习、约饭）用 add_schedule_event，别用这个。",
+            params(
+                "title" to strProp("要做的事，一句话。"),
+                "due" to strProp("截止：yyyy-MM-dd（只到天，当天 9 点提醒）或 yyyy-MM-dd HH:mm（到点提醒）。缺省：不设截止。"),
+                "remind" to boolProp("要不要到点提醒。缺省：有截止就提醒。"),
+                "priority" to enumProp("优先级。缺省：none。", "none", "low", "medium", "high"),
+                "note" to strProp("备注。"),
+                required = listOf("title"),
+            )))
+        arr.add(tool("get_todos",
+            "用户自己记的、还没办完的待办（含屁岱代记的）。不含学校事务、作业截止、评教等，那些在各自工具里。",
+            params()))
+        arr.add(tool("complete_todo",
+            "把用户自己的一条待办标为已完成。title 模糊匹配；匹配到多条时返回候选，让用户选。",
+            params(
+                "title" to strProp("待办标题或其中的关键词。"),
+                required = listOf("title"),
+            )))
         arr.add(tool("add_schedule_event",
-            "往本 App 的日程里添加一条，只限当前学期。与课程或已有日程时间重叠时不添加，返回冲突；用户确认后带 force=true 重试。",
+            "往本 App 的日程里添加一条（占课表里的一段具体时间），只限当前学期。与课程或已有日程时间重叠时不添加，返回冲突；用户确认后带 force=true 重试。" +
+                "只有截止、没有具体时段的事用 add_todo。",
             params(
                 "title" to strProp("标题。"),
                 "date" to strProp("yyyy-MM-dd；星期取这一天。"),
@@ -690,6 +711,15 @@ class AgentToolRegistry(
                 weeks = args.str("weeks"),
                 force = args.bool("force") ?: false,
             )
+            "add_todo" -> addTodo(
+                title = args.str("title"),
+                due = args.str("due"),
+                remind = args.bool("remind"),
+                priority = args.str("priority"),
+                note = args.str("note"),
+            )
+            "get_todos" -> getTodos()
+            "complete_todo" -> completeTodo(args.str("title"))
             // 给关键词就检索，不给就按目录浏览
             "list_zyxf" -> {
                 val keyword = (args.str("keyword")).orEmpty()
@@ -2242,6 +2272,7 @@ class AgentToolRegistry(
         com.xjtu.toolbox.lms.LmsActivityType.FORUM -> "讨论区"
         com.xjtu.toolbox.lms.LmsActivityType.QUESTIONNAIRE -> "问卷"
         com.xjtu.toolbox.lms.LmsActivityType.ONLINE_VIDEO -> "在线视频"
+        com.xjtu.toolbox.lms.LmsActivityType.EXAM -> "测试"
         else -> "其他"
     }
 
@@ -2272,7 +2303,6 @@ class AgentToolRegistry(
 
     private suspend fun getLmsActivities(course: String?): String {
         if (course.isNullOrBlank()) return ToolReply.missing("course")
-        com.xjtu.toolbox.lms.LmsActivityType.EXAM -> "测试"
         val site = ensureSite(LoginType.LMS)
             ?: return loginHint(LoginType.LMS)
         return try {
@@ -2714,6 +2744,71 @@ class AgentToolRegistry(
                 (if (conflicts.isNotEmpty()) "; overlaps_kept: ${conflicts.joinToString("；")}" else "")
         } catch (e: Exception) {
             ToolReply.failed("add_schedule_event", e.message)
+        }
+    }
+
+    // ── 自建待办（和日程是两件事，见 SelfTodo 的类注释） ─────────────────────
+
+    private fun addTodo(title: String?, due: String?, remind: Boolean?, priority: String?, note: String?): String {
+        val name = title?.trim()?.takeIf { it.isNotBlank() } ?: return ToolReply.missing("title")
+        val raw = due?.trim()?.takeIf { it.isNotBlank() }
+        val parsed = raw?.let {
+            com.xjtu.toolbox.inbox.SelfTodoRules.parseDue(it) ?: return ToolReply.badFormat("due", "yyyy-MM-dd 或 yyyy-MM-dd HH:mm")
+        }
+        val level = when (priority?.trim()?.lowercase()) {
+            null, "", "none" -> com.xjtu.toolbox.inbox.SelfTodoRules.PRIORITY_NONE
+            "low" -> com.xjtu.toolbox.inbox.SelfTodoRules.PRIORITY_LOW
+            "medium" -> com.xjtu.toolbox.inbox.SelfTodoRules.PRIORITY_MEDIUM
+            "high" -> com.xjtu.toolbox.inbox.SelfTodoRules.PRIORITY_HIGH
+            else -> return ToolReply.badValue("priority", "none/low/medium/high")
+        }
+        val todo = com.xjtu.toolbox.inbox.SelfTodoStore.create(
+            title = name,
+            content = note.orEmpty(),
+            dueDate = parsed?.first,
+            priority = level,
+            source = "agent",
+            allDay = parsed?.second == true,
+            remind = remind ?: (parsed != null),
+        ) ?: return ToolReply.failed("add_todo", "empty_title")
+        val remindAt = com.xjtu.toolbox.inbox.SelfTodoRules.nextReminderAt(todo, System.currentTimeMillis())
+        return "ok: added; title: ${todo.title}; due: ${raw ?: "none"}; " +
+            "remind_at: ${remindAt?.let { java.time.Instant.ofEpochMilli(it).atZone(java.time.ZoneId.of("Asia/Shanghai")).format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")) } ?: "none"}"
+    }
+
+    private fun getTodos(): String {
+        val open = com.xjtu.toolbox.inbox.SelfTodoStore.open()
+        if (open.isEmpty()) return ToolReply.empty("todos")
+        val zone = java.time.ZoneId.of("Asia/Shanghai")
+        val fmt = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")
+        return buildString {
+            append("待办（${open.size} 条未办）\n")
+            open.forEach { t ->
+                val dueMs = com.xjtu.toolbox.inbox.SelfTodoRules.dueMillis(t)
+                append("- ${t.title}")
+                if (dueMs > 0) append("｜截止 ${java.time.Instant.ofEpochMilli(dueMs).atZone(zone).format(if (t.isAllDay) DateTimeFormatter.ofPattern("yyyy-MM-dd") else fmt)}")
+                when (t.priority) {
+                    com.xjtu.toolbox.inbox.SelfTodoRules.PRIORITY_LOW -> append("｜优先级 低")
+                    com.xjtu.toolbox.inbox.SelfTodoRules.PRIORITY_MEDIUM -> append("｜优先级 中")
+                    com.xjtu.toolbox.inbox.SelfTodoRules.PRIORITY_HIGH -> append("｜优先级 高")
+                }
+                if (t.content.isNotBlank()) append("｜备注 ${t.content.take(40)}")
+                append('\n')
+            }
+        }
+    }
+
+    private fun completeTodo(title: String?): String {
+        val key = title?.trim()?.takeIf { it.isNotBlank() } ?: return ToolReply.missing("title")
+        val open = com.xjtu.toolbox.inbox.SelfTodoStore.open()
+        val hits = open.filter { it.title.contains(key, ignoreCase = true) }
+        return when {
+            hits.isEmpty() -> ToolReply.notFound("todo", key, open.take(8).map { it.title })
+            hits.size > 1 -> "error: ambiguous_match; param: title; candidates: ${hits.take(8).joinToString("；") { it.title }}"
+            else -> {
+                com.xjtu.toolbox.inbox.SelfTodoStore.complete(hits.single().id)
+                "ok: completed; title: ${hits.single().title}"
+            }
         }
     }
 
