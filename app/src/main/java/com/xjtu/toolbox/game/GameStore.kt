@@ -6,8 +6,11 @@ import android.content.SharedPreferences
 /**
  * 小游戏的本地记录：最高分与胜负战绩。
  *
- * 全部存在一份 `SharedPreferences("games")` 里，**不上传、不进任何网络请求**——
- * 这些数字只是给自己看的，没有排行榜，也就没有理由离开这台设备。
+ * 全部存在一份 `SharedPreferences("games")` 里，本身**不上传、不进任何网络请求**。
+ *
+ * 唯一的例外是分数类游戏的**全服榜**：够上榜的成绩会由 [com.xjtu.toolbox.game.board.Leaderboard]
+ * 另发一份到自建服务端，上传的只有游戏、分数、名字和一个设备级匿名 ID。这份记录仍是本地的
+ * 权威——榜拉不到、网断了都不影响这里的数字，对弈类战绩则始终不出设备。
  *
  * key 由各游戏自己定，约定见下面的常量：分数类用 `best_<game>`，
  * 对弈类按难度分别计 `<game>_win_<difficulty>` / `<game>_loss_<difficulty>`，

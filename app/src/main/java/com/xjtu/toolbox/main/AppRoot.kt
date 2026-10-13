@@ -48,6 +48,7 @@ import com.xjtu.toolbox.card.refreshCampusCardCache
 import com.xjtu.toolbox.data.AppearanceSettings
 import com.xjtu.toolbox.data.CredentialStore
 import com.xjtu.toolbox.legal.EulaScreen
+import com.xjtu.toolbox.game.board.LeaderboardHost
 import com.xjtu.toolbox.nav.AppNavHost
 import com.xjtu.toolbox.nav.AppNavigator
 import com.xjtu.toolbox.nav.AppRoute
@@ -199,6 +200,9 @@ fun AppRoot(
     ) {
         // 全应用唯一的 MFA 弹窗，放导航外层才能覆盖所有页面
         MfaDialogHost(loginState.sessionManager)
+
+        // 小游戏排行榜的弹窗（上榜询问、榜单），同理挂在导航外层
+        LeaderboardHost()
 
         // 别在这里套 Scaffold 给弹窗当宿主：SubcomposeLayout 会让整棵导航树被丢弃重建
         AppNavHost(
